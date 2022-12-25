@@ -519,6 +519,8 @@ var SyscallsLibrary = {
     assert(!exceptfds, 'exceptfds not supported');
 #endif
 
+    assert(timeout==0, 'select is fully asynchronous.');
+
     var total = 0;
     
     var srcReadLow = (readfds ? {{{ makeGetValue('readfds', 0, 'i32') }}} : 0),
@@ -600,6 +602,7 @@ var SyscallsLibrary = {
   },
   __syscall_poll__sig: 'ipii',
   __syscall_poll: function(fds, nfds, timeout) {
+    assert(timeout==0, 'poll is fully asynchronous. Got timeout of ' + timeout.toString());
     var nonzero = 0;
     for (var i = 0; i < nfds; i++) {
       var pollfd = fds + {{{ C_STRUCTS.pollfd.__size__ }}} * i;
@@ -609,7 +612,7 @@ var SyscallsLibrary = {
       var stream = FS.getStream(fd);
       if (stream) {
         mask = SYSCALLS.DEFAULT_POLLMASK;
-        if (stream.stream_ops.poll) {
+        if (stream.stream_ops != undefined && stream.stream_ops.poll) {
           mask = stream.stream_ops.poll(stream);
         }
       }
@@ -763,10 +766,13 @@ var SyscallsLibrary = {
         // musl trusts getown return values, due to a bug where they must be, as they overlap with errors. just return -1 here, so fcntl() returns that, and we set errno ourselves.
         setErrNo({{{ cDefine('EINVAL') }}});
         return -1;
+      case {{{ cDefine('F_OFD_GETLK')}}}:
+        return -{{{ cDefine('EINVAL') }}};
       default: {
 #if SYSCALL_DEBUG
         dbg('warning: fcntl unrecognized command ' + cmd);
 #endif
+assert(false, 'fcntl unrecognized command ' + cmd);
         return -{{{ cDefine('EINVAL') }}};
       }
     }

@@ -247,6 +247,7 @@ var LibraryDylink = {
   _dlsym_js__deps: ['$dlopenMissingError'],
   _dlsym_catchup_js__deps: ['$dlopenMissingError'],
 #endif
+  _dlopen_js__sig: 'p',
   _dlopen_js: function(handle) {
     abort(dlopenMissingError);
   },

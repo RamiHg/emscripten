@@ -40,6 +40,10 @@ static unsigned long long strtox(const char *s, char **p, int base, unsigned lon
 		s++;
 		if ((*s|32)=='x') {
 			s++;
+			if (*s == 0) {
+				*p = (char*)s - 1;
+				return 0;
+			}
 			base = 16;
 		} else if (base == 0) {
 			base = 8;

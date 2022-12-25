@@ -409,7 +409,7 @@ var WasiLibrary = {
 #if ASYNCIFY
     return Asyncify.handleSleep(function(wakeUp) {
       var mount = stream.node.mount;
-      if (!mount.type.syncfs) {
+      if (!mount || !mount.type.syncfs) {
         // We write directly to the file system, so there's nothing to do here.
         wakeUp(0);
         return;

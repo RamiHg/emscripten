@@ -264,6 +264,7 @@
             "O_CLOEXEC",
             "F_GETOWN", 
             "F_GETOWN_EX",
+            "F_OFD_GETLK",
             "F_SETFD",
             "O_EXCL",
             "F_GETFL",
@@ -466,6 +467,7 @@
         "defines": [
             "MAP_ANONYMOUS",
             "MAP_FIXED",
+            "MAP_SHARED",
             "MAP_PRIVATE",
             "PROT_WRITE"
         ]

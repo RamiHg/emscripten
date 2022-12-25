@@ -80,7 +80,7 @@ mergeInto(LibraryManager.library, {
         return 0;
       },
       ioctl: function (stream, request, varargs) {
-        return {{{ cDefine('EINVAL') }}};
+        return -{{{ cDefine('EINVAL') }}};
       },
       fsync: function (stream) {
         return {{{ cDefine('EINVAL') }}};

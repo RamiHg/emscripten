@@ -301,6 +301,9 @@ mergeInto(LibraryManager.library, {
         if (!FS.isFile(stream.node.mode)) {
           throw new FS.ErrnoError({{{ cDefine('ENODEV') }}});
         }
+        if (flags & {{{ cDefine('MAP_SHARED')}}}) {
+          assert(false, "MAP_SHARED support isn't here yet.");
+        }
 
         var ptr = mmapAlloc(length);
 
