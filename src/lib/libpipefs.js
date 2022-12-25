@@ -101,7 +101,7 @@ addToLibrary({
         stream.node.pipe.refcnt++;
       },
       ioctl(stream, request, varargs) {
-        return {{{ cDefs.EINVAL }}};
+        return -{{{ cDefs.EINVAL }}};
       },
       fsync(stream) {
         return {{{ cDefs.EINVAL }}};

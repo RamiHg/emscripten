@@ -550,6 +550,8 @@ var SyscallsLibrary = {
     assert(nfds <= 64, 'nfds must be less than or equal to 64');  // fd sets have 64 bits // TODO: this could be 1024 based on current musl headers
 #endif
 
+    assert(timeout==0, 'select is fully asynchronous.');
+
     var total = 0;
 
     var srcReadLow = (readfds ? {{{ makeGetValue('readfds', 0, 'i32') }}} : 0),
@@ -640,6 +642,7 @@ var SyscallsLibrary = {
     return 0; // we can't do anything synchronously; the in-memory FS is already synced to
   },
   __syscall_poll: (fds, nfds, timeout) => {
+    assert(timeout==0, 'poll is fully asynchronous. Got timeout of ' + timeout.toString());
     var nonzero = 0;
     for (var i = 0; i < nfds; i++) {
       var pollfd = fds + {{{ C_STRUCTS.pollfd.__size__ }}} * i;
@@ -649,7 +652,7 @@ var SyscallsLibrary = {
       var stream = FS.getStream(fd);
       if (stream) {
         mask = SYSCALLS.DEFAULT_POLLMASK;
-        if (stream.stream_ops.poll) {
+        if (stream.stream_ops != undefined && stream.stream_ops.poll) {
           mask = stream.stream_ops.poll(stream, -1);
         }
       }
@@ -795,6 +798,9 @@ var SyscallsLibrary = {
       case {{{ cDefs.F_SETLK }}}:
       case {{{ cDefs.F_SETLKW }}}:
         return 0; // Pretend that the locking is successful.
+      case {{{ cDefs.F_OFD_GETLK }}}:
+        return -{{{ cDefs.EINVAL }}};
+      default: {
 #if SYSCALL_DEBUG
       case {{{ cDefs.F_GETOWN_EX }}}:
       case {{{ cDefs.F_SETOWN }}}:
