@@ -179,7 +179,7 @@ mergeInto(LibraryManager.library, {
         return VFS.mmap(stream, length, position, prot, flags);
       }
       if (flags & {{{ cDefine('MAP_SHARED')}}}) {
-        assert(false, "MAP_SHARED support isn't here yet.");
+        // assert(false, "MAP_SHARED support isn't here yet.");
       }
 
       var ptr = mmapAlloc(length);

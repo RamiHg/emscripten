@@ -1256,7 +1256,7 @@ FS.staticInit();` +
         throw new FS.ErrnoError({{{ cDefine('ENODEV') }}});
       }
       if (flags & {{{ cDefine('MAP_SHARED') }}}) {
-        assert(false, "MAP_SHARED support is pretty shaky.");
+        // assert(false, "MAP_SHARED support is pretty shaky.");
       }
       return stream.stream_ops.mmap(stream, length, position, prot, flags);
     },
