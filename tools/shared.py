@@ -8,7 +8,6 @@ from .toolchain_profiler import ToolchainProfiler
 from functools import wraps
 from subprocess import PIPE
 import atexit
-import binascii
 import json
 import logging
 import os
@@ -45,7 +44,11 @@ from .settings import settings
 
 
 DEBUG_SAVE = DEBUG or int(os.environ.get('EMCC_DEBUG_SAVE', '0'))
-MINIMUM_NODE_VERSION = (4, 1, 1)
+# Minimum node version required to run the emscripten compiler.  This is distinct
+# from the minimum version required to execute the generated code.  This is not an
+# exact requirement, but is the oldest version of node that we do any testing with.
+# This version aligns with the current Ubuuntu TLS 20.04 (Focal).
+MINIMUM_NODE_VERSION = (10, 19, 0)
 EXPECTED_LLVM_VERSION = "16.0"
 
 # Used only when EM_PYTHON_MULTIPROCESSING=1 env. var is set.
@@ -74,6 +77,7 @@ diagnostics.add_warning('transpile')
 diagnostics.add_warning('limited-postlink-optimizations')
 diagnostics.add_warning('em-js-i64')
 diagnostics.add_warning('js-compiler')
+diagnostics.add_warning('compatibility')
 # Closure warning are not (yet) enabled by default
 diagnostics.add_warning('closure', enabled=False)
 
@@ -295,7 +299,7 @@ def get_clang_targets():
     exit_with_error('clang executable not found at `%s`' % CLANG_CC)
   try:
     target_info = run_process([CLANG_CC, '-print-targets'], stdout=PIPE).stdout
-  except subprocess.CalldProcessError:
+  except subprocess.CalledProcessError:
     exit_with_error('error running `clang -print-targets`.  Check your llvm installation (%s)' % CLANG_CC)
   if 'Registered Targets:' not in target_info:
     exit_with_error('error parsing output of `clang -print-targets`.  Check your llvm installation (%s)' % CLANG_CC)
@@ -382,14 +386,7 @@ def set_version_globals():
 
 
 def generate_sanity():
-  sanity_file_content = f'{EMSCRIPTEN_VERSION}|{config.LLVM_ROOT}|{get_clang_version()}'
-  if os.path.exists(config.EM_CONFIG):
-    config_data = utils.read_file(config.EM_CONFIG)
-  else:
-    config_data = ''
-  checksum = binascii.crc32(config_data.encode())
-  sanity_file_content += '|%#x\n' % checksum
-  return sanity_file_content
+  return f'{EMSCRIPTEN_VERSION}|{config.LLVM_ROOT}|{get_clang_version()}'
 
 
 def perform_sanity_checks():
@@ -449,19 +446,25 @@ def check_sanity(force=False):
   sanity_file = cache.get_path('sanity.txt')
 
   def sanity_is_correct():
-    if os.path.exists(sanity_file):
+    sanity_data = None
+    # We can't simply check for the existence of sanity_file and then read from
+    # it here because we don't hold the cache lock yet and some other process
+    # could clear the cache between checking for, and reading from, the file.
+    try:
       sanity_data = utils.read_file(sanity_file)
-      if sanity_data == expected:
-        logger.debug(f'sanity file up-to-date: {sanity_file}')
-        # Even if the sanity file is up-to-date we still need to at least
-        # check the llvm version. This comes at no extra performance cost
-        # since the version was already extracted and cached by the
-        # generate_sanity() call above.
-        if force:
-          perform_sanity_checks()
-        else:
-          check_llvm_version()
-        return True # all is well
+    except Exception:
+      pass
+    if sanity_data == expected:
+      logger.debug(f'sanity file up-to-date: {sanity_file}')
+      # Even if the sanity file is up-to-date we still need to at least
+      # check the llvm version. This comes at no extra performance cost
+      # since the version was already extracted and cached by the
+      # generate_sanity() call above.
+      if force:
+        perform_sanity_checks()
+      else:
+        check_llvm_version()
+      return True # all is well
     return False
 
   if sanity_is_correct():
@@ -694,7 +697,7 @@ def read_and_preprocess(filename, expand_macros=False):
   # Create a settings file with the current settings to pass to the JS preprocessor
 
   settings_str = ''
-  for key, value in settings.dict().items():
+  for key, value in settings.external_dict().items():
     assert key == key.upper()  # should only ever be uppercase keys in settings
     jsoned = json.dumps(value, sort_keys=True)
     settings_str += f'var {key} = {jsoned};\n'

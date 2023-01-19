@@ -280,8 +280,9 @@ class sanity(RunnerCore):
 
     for version, succeed in [('v0.8.0', False),
                              ('v4.1.0', False),
-                             ('v4.1.1', True),
-                             ('v4.2.3-pre', True),
+                             ('v10.18.0', False),
+                             ('v10.19.0', True),
+                             ('v10.19.1-pre', True),
                              ('cheez', False)]:
       print(version, succeed)
       delete_file(SANITY_FILE)
@@ -344,12 +345,6 @@ fi
     # Make sure the test runner didn't do anything to the setup
     output = self.check_working(EMCC)
     self.assertNotContained(SANITY_MESSAGE, output)
-    self.assertNotContained(SANITY_FAIL_MESSAGE, output)
-
-    # emcc should also check sanity if the file is outdated
-    open(EM_CONFIG, 'a').write('# extra stuff\n')
-    output = self.check_working(EMCC)
-    self.assertContained(SANITY_MESSAGE, output)
     self.assertNotContained(SANITY_FAIL_MESSAGE, output)
 
   def test_em_config_env_var(self):

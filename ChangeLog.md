@@ -18,8 +18,36 @@ to browse the changes between the tags.
 
 See docs/process.md for more on how version tagging works.
 
-3.1.29 (in development)
+3.1.31 (in development)
 -----------------------
+- The `STACK_SIZE`, `STACK_ALIGN`, `POINTER_SIZE`, and `ASSERTIONS` JavaScript
+  globals were removed by default.  In debug builds a clear error is shown if
+  you try to use these. (#18503)
+- --pre-js and --post-js files are now fed through the JS preprocesor, just
+  like JS library files and the core runtime JS files.  This means they can
+  now contain #if/#else/#endif blocks and {{{ }}} macro blocks. (#18525)
+
+3.1.30 - 01/11/23
+-----------------
+- The default pthread stack size will now be set to match `-sSTACK_SIZE` by
+  default.  Set `DEFAULT_PTHREAD_STACK_SIZE` explicitly to override this.
+  (#18479)
+- The `buffer` JavaScript variable was removed.  This underlying buffer is
+  still accessible via `wasmMemory.buffer` or `HEAPXX.buffer`.  In debug builds,
+  a clear error is shown if you try to use it.  (#18454)
+- The SDLv1 header directory is no longer added to the include path by default.
+  This means if you include SDL headers without the explicit version in them
+  (e.g. `SDL_events.h`) you will now need to add `-sUSE_SDL` explicitly at
+  compile time.  If you include the SDL headers with the directory name included
+  (e.g. `SDL/SDL_events.h`) you will not be affected by this change. (#18443)
+- Significant improvements were made (in the version of LLVM associated with
+  this emsdk release) to the quality of DWARF debug info when building in
+  optimized mode. See https://reviews.llvm.org/D140373. Using the -O1 flag is
+  recommended if a program is too large or slow to debug with -O0 (although
+  -O0 is still better for debugging when feasible).
+
+3.1.29 - 01/03/23
+-----------------
 - Fixed bug in `PROXY_TO_PTHREAD` whereby certain async operations on the main
   thread would cause the whole program to exit, even when the proxied main
   function was still running. (#18372)

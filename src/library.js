@@ -172,22 +172,23 @@ mergeInto(LibraryManager.library, {
   // Grows the wasm memory to the given byte size, and updates the JS views to
   // it. Returns 1 on success, 0 on error.
   $emscripten_realloc_buffer: function(size) {
+    var b = wasmMemory.buffer;
 #if MEMORYPROFILER
-    var oldHeapSize = buffer.byteLength;
+    var oldHeapSize = b.byteLength;
 #endif
     try {
       // round size grow request up to wasm page size (fixed 64KB per spec)
-      wasmMemory.grow((size - buffer.byteLength + 65535) >>> 16); // .grow() takes a delta compared to the previous size
-      updateGlobalBufferAndViews(wasmMemory.buffer);
+      wasmMemory.grow((size - b.byteLength + 65535) >>> 16); // .grow() takes a delta compared to the previous size
+      updateMemoryViews();
 #if MEMORYPROFILER
       if (typeof emscriptenMemoryProfiler != 'undefined') {
-        emscriptenMemoryProfiler.onMemoryResize(oldHeapSize, buffer.byteLength);
+        emscriptenMemoryProfiler.onMemoryResize(oldHeapSize, b.byteLength);
       }
 #endif
       return 1 /*success*/;
     } catch(e) {
 #if ASSERTIONS
-      err('emscripten_realloc_buffer: Attempted to grow heap from ' + buffer.byteLength  + ' bytes to ' + size + ' bytes, but got error: ' + e);
+      err('emscripten_realloc_buffer: Attempted to grow heap from ' + b.byteLength  + ' bytes to ' + size + ' bytes, but got error: ' + e);
 #endif
     }
     // implicit 0 return to save code size (caller will cast "undefined" into 0
@@ -324,7 +325,7 @@ mergeInto(LibraryManager.library, {
 #if ASSERTIONS
     assert(memoryIndex == 0);
 #endif
-    updateGlobalBufferAndViews(wasmMemory.buffer);
+    updateMemoryViews();
   },
 
   system__deps: ['$setErrNo'],
@@ -2263,14 +2264,41 @@ mergeInto(LibraryManager.library, {
     return 0;
   },
 
-  // http://pubs.opengroup.org/onlinepubs/000095399/functions/alarm.html
-  alarm__deps: ['raise', '$callUserCallback'],
-  alarm: function(seconds) {
-    setTimeout(function() {
-      callUserCallback(function() {
-        _raise({{{ cDefine('SIGALRM') }}});
-      });
-    }, seconds*1000);
+  $timers: {},
+
+  // Helper function for setitimer that registers timers with the eventloop.
+  // Timers always fire on the main thread, either directly from JS (here) or
+  // or when the main thread is busy waiting calling _emscripten_yield.
+  _setitimer_js__sig: 'iid',
+  _setitimer_js__proxy: 'sync',
+  _setitimer_js__deps: ['$timers', '$callUserCallback',
+                        '_emscripten_timeout', 'emscripten_get_now'],
+  _setitimer_js: function(which, timeout_ms) {
+#if RUNTIME_DEBUG
+    dbg('setitimer_js ' + which + ' timeout=' + timeout_ms);
+#endif
+    // First, clear any existing timer.
+    if (timers[which]) {
+      clearTimeout(timers[which].id);
+      delete timers[which];
+    }
+
+    // A timeout of zero simply cancels the current timeout so we have nothing
+    // more to do.
+    if (!timeout_ms) return 0;
+
+    var id = setTimeout(() => {
+#if ASSERTIONS
+      assert(which in timers);
+#endif
+      delete timers[which];
+#if RUNTIME_DEBUG
+      dbg('itimer fired: ' + which);
+#endif
+      callUserCallback(() => __emscripten_timeout(which, _emscripten_get_now()));
+    }, timeout_ms);
+    timers[which] = { id: id, timeout_ms: timeout_ms };
+    return 0;
   },
 
   // Helper for raise() to avoid signature mismatch failures:
@@ -2974,6 +3002,7 @@ mergeInto(LibraryManager.library, {
     return readEmAsmArgsArray;
   },
 
+#if HAVE_EM_ASM
   $runEmAsmFunction__sig: 'ippp',
   $runEmAsmFunction__deps: ['$readEmAsmArgs'],
   $runEmAsmFunction: function(code, sigPtr, argbuf) {
@@ -3041,6 +3070,7 @@ mergeInto(LibraryManager.library, {
   emscripten_asm_const_async_on_main_thread: function(code, sigPtr, argbuf) {
     return runMainThreadEmAsm(code, sigPtr, argbuf, 0);
   },
+#endif
 
 #if !DECLARE_ASM_MODULE_EXPORTS
   // When DECLARE_ASM_MODULE_EXPORTS is not set we export native symbols
@@ -3457,7 +3487,7 @@ mergeInto(LibraryManager.library, {
     checkStackCookie();
     if (e instanceof WebAssembly.RuntimeError) {
       if (_emscripten_stack_get_current() <= 0) {
-        err('Stack overflow detected.  You can try increasing -sSTACK_SIZE (currently set to ' + STACK_SIZE + ')');
+        err('Stack overflow detected.  You can try increasing -sSTACK_SIZE (currently set to ' + {{{ STACK_SIZE }}} + ')');
       }
     }
 #endif
@@ -3696,6 +3726,47 @@ mergeInto(LibraryManager.library, {
     dbg('done preloading data files');
 #endif
   },
+
+  $handleAllocator__docs: '/** @constructor */',
+  $handleAllocator: function() {
+    this.allocated = [];
+    this.freelist = [];
+    this.get = function(id) {
+#if ASSERTIONS
+      assert(this.allocated[id] !== undefined);
+#endif
+      return this.allocated[id];
+    };
+    this.allocate = function(handle) {
+      let id;
+      if (this.freelist.length > 0) {
+        id = this.freelist.pop();
+        this.allocated[id] = handle;
+      } else {
+        id = this.allocated.length;
+        this.allocated.push(handle);
+      }
+      return id;
+    };
+    this.free = function(id) {
+#if ASSERTIONS
+      assert(this.allocated[id] !== undefined);
+#endif
+      delete this.allocated[id];
+      this.freelist.push(id);
+    };
+  },
+
+  $getNativeTypeSize__deps: ['$POINTER_SIZE'],
+  $getNativeTypeSize: {{{ getNativeTypeSize }}},
+
+  // We used to define these globals unconditionally in support code.
+  // Instead, we now define them here so folks can pull it in explicitly, on
+  // demand.
+  $STACK_SIZE: {{{ STACK_SIZE }}},
+  $STACK_ALIGN: {{{ STACK_ALIGN }}},
+  $POINTER_SIZE: {{{ POINTER_SIZE }}},
+  $ASSERTIONS: {{{ ASSERTIONS }}},
 });
 
 function autoAddDeps(object, name) {

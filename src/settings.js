@@ -1,14 +1,8 @@
+// Settings that control the emscripten compiler.  These are available to the
+// python code and also as global variables when the JS compiler runs. They
+// are set via the command line.  For example:
 //
-// @license
-// Copyright 2010 The Emscripten Authors
-// SPDX-License-Identifier: MIT
-//
-
-//
-// Various compiler settings. These are simply variables present when the
-// JS compiler runs. To set them, do something like:
-//
-//   emcc -sOPTION1=VALUE1 -sOPTION2=VALUE2 [..other stuff..]
+//   emcc -sOPTION1=VALUE1 -sOPTION2=ITEM1,ITEM2 [..other stuff..]
 //
 // For convenience and readability `-sOPTION` expands to `-sOPTION=1`
 // and `-sNO_OPTION` expands to `-sOPTION=0` (assuming OPTION is a valid
@@ -1412,7 +1406,7 @@ var LEGALIZE_JS_FFI = true;
 // When AUTO_JS_LIBRARIES is set to 0 this defaults to 0 and SDL
 // is not linked in.
 // [compile+link]
-var USE_SDL = 1;
+var USE_SDL = 0;
 
 // Specify the SDL_gfx version that is being linked against. Must match USE_SDL
 // [compile+link]
@@ -1587,18 +1581,14 @@ var PTHREAD_POOL_SIZE_STRICT = 1;
 // [link] - affects generated JS runtime code at link time
 var PTHREAD_POOL_DELAY_LOAD = false;
 
-// If not explicitly specified, this is the stack size to use for newly created
-// pthreads.  According to
-// http://man7.org/linux/man-pages/man3/pthread_create.3.html, default stack
-// size on Linux/x86-32 for a new thread is 2 megabytes, so follow the same
-// convention. Use pthread_attr_setstacksize() at thread creation time to
-// explicitly specify the stack size, in which case this value is ignored. Note
-// that the wasm function call control flow stack is separate from this
-// stack, and this stack only contains certain function local variables, such as
-// those that have their addresses taken, or ones that are too large to fit as
-// local vars in wasm code.
+// Default stack size to use for newly created pthreads.  When not set, this
+// defaults to STACK_SIZE (which in turn defaults to 64k).  Can also be set at
+// runtime using pthread_attr_setstacksize().  Note that the wasm control flow
+// stack is separate from this stack.  This stack only contains certain function
+// local variables, such as those that have their addresses taken, or ones that
+// are too large to fit as local vars in wasm code.
 // [link]
-var DEFAULT_PTHREAD_STACK_SIZE = 64*1024;
+var DEFAULT_PTHREAD_STACK_SIZE = 0;
 
 // True when building with --threadprofiler
 // [link]

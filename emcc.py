@@ -524,7 +524,11 @@ def get_all_js_syms():
 
   # We define a cache hit as when the settings and `--js-library` contents are
   # identical.
-  input_files = [json.dumps(settings.dict(), sort_keys=True, indent=2)]
+  # Ignore certain settings that can are no relevant to library deps.  Here we
+  # skip PRE_JS_FILES/POST_JS_FILES which don't effect the library symbol list
+  # and can contain full paths to temporary files.
+  skip_settings = {'PRE_JS_FILES', 'POST_JS_FILES'}
+  input_files = [json.dumps(settings.external_dict(skip_keys=skip_settings), sort_keys=True, indent=2)]
   for jslib in sorted(glob.glob(utils.path_from_root('src') + '/library*.js')):
     input_files.append(read_file(jslib))
   for jslib in settings.JS_LIBRARIES:
@@ -818,7 +822,7 @@ def process_dynamic_libs(dylibs, lib_dirs):
   for dylib in dylibs:
     exports = webassembly.get_exports(dylib)
     exports = set(e.name for e in exports)
-    settings.SIDE_MODULE_EXPORTS.extend(exports)
+    settings.SIDE_MODULE_EXPORTS.extend(sorted(exports))
 
     imports = webassembly.get_imports(dylib)
     imports = [i.field for i in imports if i.kind in (webassembly.ExternType.FUNC, webassembly.ExternType.GLOBAL, webassembly.ExternType.TAG)]
@@ -826,12 +830,13 @@ def process_dynamic_libs(dylibs, lib_dirs):
     # on the dynamic linker to create them on the fly.
     # TODO(sbc): Integrate with metadata.invokeFuncs that comes from the
     # main module to avoid creating new invoke functions at runtime.
+    imports = set(imports)
     imports = set(i for i in imports if not i.startswith('invoke_'))
-    weak_imports = imports.intersection(exports)
-    strong_imports = imports.difference(exports)
+    weak_imports = sorted(imports.intersection(exports))
+    strong_imports = sorted(imports.difference(exports))
     logger.debug('Adding symbols requirements from `%s`: %s', dylib, imports)
 
-    mangled_imports = [shared.asmjs_mangle(e) for e in imports]
+    mangled_imports = [shared.asmjs_mangle(e) for e in sorted(imports)]
     mangled_strong_imports = [shared.asmjs_mangle(e) for e in strong_imports]
     settings.SIDE_MODULE_IMPORTS.extend(mangled_imports)
     settings.EXPORTED_FUNCTIONS.extend(mangled_strong_imports)
@@ -915,6 +920,9 @@ def emsdk_cflags(user_args):
 
   if array_contains_any_of(user_args, SIMD_NEON_FLAGS):
     cflags += ['-D__ARM_NEON__=1']
+
+  if not settings.USE_SDL:
+    cflags += ['-Xclang', '-iwithsysroot' + os.path.join('/include', 'fakesdl')]
 
   return cflags + ['-Xclang', '-iwithsysroot' + os.path.join('/include', 'compat')]
 
@@ -1086,7 +1094,7 @@ def get_subresource_location(path, data_uri=None):
 def package_files(options, target):
   rtn = []
   logger.debug('setting up files')
-  file_args = ['--from-emcc', '--export-name=' + settings.EXPORT_NAME]
+  file_args = ['--from-emcc']
   if options.preload_files:
     file_args.append('--preload')
     file_args += options.preload_files
@@ -1115,7 +1123,7 @@ def package_files(options, target):
   if options.preload_files:
     # Preloading files uses --pre-js code that runs before the module is loaded.
     file_code = shared.check_call(cmd, stdout=PIPE).stdout
-    options.pre_js = js_manipulation.add_files_pre_js(options.pre_js, file_code)
+    js_manipulation.add_files_pre_js(options.pre_js, file_code)
   else:
     # Otherwise, we are embedding files, which does not require --pre-js code,
     # and instead relies on a static constrcutor to populate the filesystem.
@@ -1288,6 +1296,9 @@ There is NO warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR P
   # Embed and preload files
   if len(options.preload_files) or len(options.embed_files):
     linker_arguments += package_files(options, target)
+
+  settings.PRE_JS_FILES = [os.path.abspath(f) for f in options.pre_js]
+  settings.POST_JS_FILES = [os.path.abspath(f) for f in options.post_js]
 
   if options.oformat == OFormat.OBJECT:
     logger.debug(f'link_to_object: {linker_arguments} -> {target}')
@@ -1623,6 +1634,8 @@ def setup_pthreads(target):
   if settings.ALLOW_MEMORY_GROWTH:
     diagnostics.warning('pthreads-mem-growth', 'USE_PTHREADS + ALLOW_MEMORY_GROWTH may run non-wasm code slowly, see https://github.com/WebAssembly/design/issues/1271')
 
+  default_setting('DEFAULT_PTHREAD_STACK_SIZE', settings.STACK_SIZE)
+
   # Functions needs to be exported from the module since they are used in worker.js
   settings.REQUIRED_EXPORTS += [
     'emscripten_dispatch_to_thread_',
@@ -1699,7 +1712,7 @@ def setup_pthreads(target):
 
 @ToolchainProfiler.profile_block('linker_setup')
 def phase_linker_setup(options, state, newargs):
-  autoconf = os.environ.get('EMMAKEN_JUST_CONFIGURE') or 'conftest.c' in state.orig_args
+  autoconf = os.environ.get('EMMAKEN_JUST_CONFIGURE') or 'conftest.c' in state.orig_args or 'conftest.cpp' in state.orig_args
   if autoconf:
     # configure tests want a more shell-like style, where we emit return codes on exit()
     settings.EXIT_RUNTIME = 1
@@ -1744,8 +1757,6 @@ def phase_linker_setup(options, state, newargs):
       exit_with_error('PTHREADS_PROFILING only works with ASSERTIONS enabled')
     options.post_js.append(utils.path_from_root('src/threadprofiler.js'))
 
-  options.pre_js = read_js_files(options.pre_js)
-  options.post_js = read_js_files(options.post_js)
   options.extern_pre_js = read_js_files(options.extern_pre_js)
   options.extern_post_js = read_js_files(options.extern_post_js)
 
@@ -1914,9 +1925,6 @@ def phase_linker_setup(options, state, newargs):
     default_setting('AUTO_ARCHIVE_INDEXES', 0)
     default_setting('IGNORE_MISSING_MAIN', 0)
     default_setting('ALLOW_UNIMPLEMENTED_SYSCALLS', 0)
-
-  if not settings.AUTO_JS_LIBRARIES:
-    default_setting('USE_SDL', 0)
 
   if 'GLOBAL_BASE' not in user_settings and not settings.SHRINK_LEVEL and not settings.OPT_LEVEL:
     # When optimizing for size it helps to put static data first before
@@ -3018,7 +3026,8 @@ def phase_post_link(options, state, in_wasm, wasm_target, target):
 
   phase_emscript(options, in_wasm, wasm_target, memfile)
 
-  phase_source_transforms(options)
+  if options.js_transform:
+    phase_source_transforms(options)
 
   if memfile and not settings.MINIMAL_RUNTIME:
     # MINIMAL_RUNTIME doesn't use `var memoryInitializer` but instead expects Module['mem'] to
@@ -3052,28 +3061,14 @@ def phase_emscript(options, in_wasm, wasm_target, memfile):
 
 @ToolchainProfiler.profile_block('source transforms')
 def phase_source_transforms(options):
-  global final_js
-
-  # Apply pre and postjs files
-  if final_js and (options.pre_js or options.post_js):
-    logger.debug('applying pre/postjses')
-    src = read_file(final_js)
-    final_js += '.pp.js'
-    with open(final_js, 'w', encoding='utf-8') as f:
-      # pre-js code goes right after the Module integration code (so it
-      # can use Module), we have a marker for it
-      f.write(do_replace(src, '// {{PRE_JSES}}', options.pre_js))
-      f.write(options.post_js)
-    save_intermediate('pre-post')
-
   # Apply a source code transformation, if requested
-  if options.js_transform:
-    safe_copy(final_js, final_js + '.tr.js')
-    final_js += '.tr.js'
-    posix = not shared.WINDOWS
-    logger.debug('applying transform: %s', options.js_transform)
-    shared.check_call(building.remove_quotes(shlex.split(options.js_transform, posix=posix) + [os.path.abspath(final_js)]))
-    save_intermediate('transformed')
+  global final_js
+  safe_copy(final_js, final_js + '.tr.js')
+  final_js += '.tr.js'
+  posix = not shared.WINDOWS
+  logger.debug('applying transform: %s', options.js_transform)
+  shared.check_call(building.remove_quotes(shlex.split(options.js_transform, posix=posix) + [os.path.abspath(final_js)]))
+  save_intermediate('transformed')
 
 
 @ToolchainProfiler.profile_block('memory initializer')
@@ -3083,7 +3078,7 @@ def phase_memory_initializer(memfile):
   global final_js
 
   src = read_file(final_js)
-  src = do_replace(src, '// {{MEM_INITIALIZER}}', 'var memoryInitializer = "%s";' % os.path.basename(memfile))
+  src = do_replace(src, '<<< MEM_INITIALIZER >>>', '"%s"' % os.path.basename(memfile))
   write_file(final_js + '.mem.js', src)
   final_js += '.mem.js'
 
@@ -3766,9 +3761,12 @@ def modularize():
   if not settings.EXPORT_READY_PROMISE:
     return_value = '{}'
 
+  # TODO: Remove when https://bugs.webkit.org/show_bug.cgi?id=223533 is resolved.
+  if async_emit != '' and settings.EXPORT_NAME == 'config':
+    diagnostics.warning('emcc', 'EXPORT_NAME should not be named "config" when targeting Safari')
+
   src = '''
-%(maybe_async)sfunction(%(EXPORT_NAME)s) {
-  %(EXPORT_NAME)s = %(EXPORT_NAME)s || {};
+%(maybe_async)sfunction(%(EXPORT_NAME)s = {})  {
 
 %(src)s
 

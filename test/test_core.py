@@ -100,13 +100,12 @@ def with_both_eh_sjlj(f):
       # Wasm EH is currently supported only in wasm backend and V8
       if not self.is_wasm():
         self.skipTest('wasm2js does not support wasm EH/SjLj')
-      self.require_v8()
+      self.require_wasm_eh()
       # FIXME Temporarily disabled. Enable this later when the bug is fixed.
       if '-fsanitize=address' in self.emcc_args:
         self.skipTest('Wasm EH does not work with asan yet')
       self.emcc_args.append('-fwasm-exceptions')
       self.set_setting('SUPPORT_LONGJMP', 'wasm')
-      self.v8_args.append('--experimental-wasm-eh')
       f(self)
     else:
       if self.get_setting('MEMORY64'):
@@ -135,12 +134,11 @@ def with_both_sjlj(f):
       # Wasm SjLj is currently supported only in wasm backend and V8
       if not self.is_wasm():
         self.skipTest('wasm2js does not support wasm SjLj')
-      self.require_v8()
+      self.require_wasm_eh()
       # FIXME Temporarily disabled. Enable this later when the bug is fixed.
       if '-fsanitize=address' in self.emcc_args:
         self.skipTest('Wasm EH does not work with asan yet')
       self.set_setting('SUPPORT_LONGJMP', 'wasm')
-      self.v8_args.append('--experimental-wasm-eh')
       f(self)
     else:
       self.set_setting('SUPPORT_LONGJMP', 'emscripten')
@@ -264,7 +262,6 @@ def with_asyncify_and_stack_switching(f):
       self.require_v8()
       # enable stack switching and other relevant features (like reference types
       # for the return value of externref)
-      self.v8_args.append('--wasm-staging')
       self.v8_args.append('--experimental-wasm-stack-switching')
       if not self.is_wasm():
         self.skipTest('wasm2js does not support WebAssembly.Suspender yet')
@@ -1134,12 +1131,11 @@ base align: 0, 0, 0, 0'''])
     self.set_setting('SUPPORT_LONGJMP', 'wasm')
     if not self.is_wasm():
       self.skipTest('wasm2js does not support wasm EH/SjLj')
-    self.require_v8()
+    self.require_wasm_eh()
     # FIXME Temporarily disabled. Enable this later when the bug is fixed.
     if '-fsanitize=address' in self.emcc_args:
       self.skipTest('Wasm EH does not work with asan yet')
     self.emcc_args.append('-fwasm-exceptions')
-    self.v8_args.append('--experimental-wasm-eh')
     for arg in ['-fwasm-exceptions', '-fno-exceptions']:
       self.do_core_test('test_longjmp.c', emcc_args=[arg])
 
@@ -1272,12 +1268,11 @@ int main()
     self.clear_setting('DISABLE_EXCEPTION_CATCHING')
     if not self.is_wasm():
       self.skipTest('wasm2js does not support wasm EH/SjLj')
-    self.require_v8()
+    self.require_wasm_eh()
     # FIXME Temporarily disabled. Enable this later when the bug is fixed.
     if '-fsanitize=address' in self.emcc_args:
       self.skipTest('Wasm EH does not work with asan yet')
     self.emcc_args.append('-fwasm-exceptions')
-    self.v8_args.append('--experimental-wasm-eh')
     for support_longjmp in [0, 'wasm']:
       self.set_setting('SUPPORT_LONGJMP', support_longjmp)
       self.do_run_from_file(test_file('core/test_exceptions.cpp'), test_file('core/test_exceptions_caught.out'))
@@ -1315,42 +1310,32 @@ int main()
     src = '''
     #include <iostream>
 
-    class MyException
-    {
+    class MyException {
     public:
         MyException(){ std::cout << "Construct..."; }
         MyException( const MyException & ) { std::cout << "Copy..."; }
         ~MyException(){ std::cout << "Destruct..."; }
     };
 
-    int function()
-    {
+    int function() {
         std::cout << "Throw...";
         throw MyException();
     }
 
-    int function2()
-    {
+    int function2() {
         return function();
     }
 
-    int main()
-    {
-        try
-        {
+    int main() {
+        try {
             function2();
-        }
-        catch (MyException & e)
-        {
+        } catch (MyException & e) {
             std::cout << "Caught...";
         }
 
-        try
-        {
+        try {
             function2();
-        }
-        catch (MyException e)
-        {
+        } catch (MyException e) {
             std::cout << "Caught...";
         }
 
@@ -1376,8 +1361,7 @@ int main()
 #include <iostream>
 #include <stdexcept>
 
-int main(int argc, char **argv)
-{
+int main(int argc, char **argv) {
   if (argc != 2) {
     std::cout << "need an arg" << std::endl;
     return 1;
@@ -1745,10 +1729,10 @@ int main () {
     # abort() should not run destructors
     out = self.do_run(r'''
 #include <stdlib.h>
-#include <iostream>
+#include <stdio.h>
 
 struct Foo {
-  ~Foo() { std::cout << "Destructing Foo" << std::endl; }
+  ~Foo() { printf("Destructing Foo\n"); }
 };
 
 int main() {
@@ -2294,6 +2278,12 @@ int main(int argc, char **argv) {
     self.node_args += shared.node_bigint_flags()
     self.do_core_test('test_em_js_i64.c')
 
+  def test_em_js_address_taken(self):
+    self.do_core_test('test_em_js_address_taken.c')
+    if self.check_dylink():
+      self.set_setting('MAIN_MODULE', 2)
+      self.do_core_test('test_em_js_address_taken.c')
+
   def test_runtime_stacksave(self):
     self.do_runf(test_file('core/test_runtime_stacksave.c'), 'success')
 
@@ -2477,6 +2467,7 @@ int main(int argc, char **argv) {
 
   @no_wasm2js('massive switches can break js engines')
   def test_bigswitch(self):
+    self.set_setting('USE_SDL')
     self.do_runf(test_file('bigswitch.cpp'), '''34962: GL_ARRAY_BUFFER (0x8892)
 26214: what?
 35040: GL_STREAM_DRAW (0x88E0)
@@ -2764,7 +2755,6 @@ The current type of b is: 9
                                  interleaved_output=False, emcc_args=args)
 
   @node_pthreads
-  @no_wasm2js('occasionally hangs in wasm2js (#16569)')
   def test_pthread_proxying_cpp(self):
     self.set_setting('EXIT_RUNTIME')
     self.set_setting('PROXY_TO_PTHREAD')
@@ -5553,7 +5543,7 @@ Module = {
       stdin: function() { return Module.data.pop() || null },
       stdout: function(x) { out('got: ' + x) }
     };
-''')
+    ''')
     self.emcc_args += ['--pre-js', 'pre.js']
 
     src = r'''
@@ -5623,8 +5613,7 @@ Module = {
     src = r'''
       #include <stdio.h>
       char buf[32];
-      int main()
-      {
+      int main() {
         const char *r = "SUCCESS";
         FILE *f = fopen("eol.txt", "r");
         while (fgets(buf, 32, f) != NULL) {
@@ -5648,65 +5637,62 @@ Module = {
       #include <stdio.h>
       #include <assert.h>
       #include <float.h>
-      int main()
-      {
-          float x = FLT_MAX, y = FLT_MAX, z = FLT_MAX;
+      int main() {
+        float x = FLT_MAX, y = FLT_MAX, z = FLT_MAX;
 
-          FILE* fp = fopen("three_numbers.txt", "r");
-          if (fp) {
-              int match = fscanf(fp, " %f %f %f ", &x, &y, &z);
-              printf("match = %d\n", match);
-              printf("x = %0.1f, y = %0.1f, z = %0.1f\n", x, y, z);
-          } else {
-              printf("failed to open three_numbers.txt\n");
-          }
-          return 0;
+        FILE* fp = fopen("three_numbers.txt", "r");
+        if (fp) {
+          int match = fscanf(fp, " %f %f %f ", &x, &y, &z);
+          printf("match = %d\n", match);
+          printf("x = %0.1f, y = %0.1f, z = %0.1f\n", x, y, z);
+        } else {
+          printf("failed to open three_numbers.txt\n");
+        }
+        return 0;
       }
     '''
     self.emcc_args += ['--embed-file', 'three_numbers.txt']
     self.do_run(src, 'match = 3\nx = -1.0, y = 0.1, z = -0.1\n')
 
   def test_fscanf_2(self):
-    create_file('a.txt', '''1/2/3 4/5/6 7/8/9
-''')
+    create_file('a.txt', '1/2/3 4/5/6 7/8/9\n')
     self.emcc_args += ['--embed-file', 'a.txt']
-    self.do_run(r'''#include <cstdio>
-#include <iostream>
+    self.do_run(r'''\
+      #include <stdio.h>
 
-using namespace std;
+      int main(int argv, char** argc) {
+        printf("fscanf test\n");
 
-int
-main( int argv, char ** argc ) {
-    cout << "fscanf test" << endl;
+        FILE* file = fopen("a.txt", "rb");
+        int vertexIndex[4];
+        int normalIndex[4];
+        int uvIndex[4];
 
-    FILE * file;
-    file = fopen("a.txt", "rb");
-    int vertexIndex[4];
-    int normalIndex[4];
-    int uvIndex[4];
+        int matches = fscanf(file, "%d/%d/%d %d/%d/%d %d/%d/%d %d/%d/%d\n",
+                             &vertexIndex[0], &uvIndex[0], &normalIndex[0],
+                             &vertexIndex[1], &uvIndex[1], &normalIndex[1],
+                             &vertexIndex[2], &uvIndex[2], &normalIndex[2],
+                             &vertexIndex[3], &uvIndex[3], &normalIndex[3]);
+        fclose(file);
 
-    int matches = fscanf(file, "%d/%d/%d %d/%d/%d %d/%d/%d %d/%d/%d\n", &vertexIndex[0], &uvIndex[0], &normalIndex[0], &vertexIndex    [1], &uvIndex[1], &normalIndex[1], &vertexIndex[2], &uvIndex[2], &normalIndex[2], &vertexIndex[3], &uvIndex[3], &normalIndex[3]);
-
-    cout << matches << endl;
-
-    return 0;
-}
-''', 'fscanf test\n9\n')
+        printf("matches: %d\n", matches);
+        return 0;
+      }
+    ''', 'fscanf test\nmatches: 9\n')
 
   def test_fileno(self):
     create_file('empty.txt', '')
     src = r'''
       #include <stdio.h>
       #include <unistd.h>
-      int main()
-      {
-          FILE* fp = fopen("empty.txt", "r");
-          if (fp) {
-              printf("%d\n", fileno(fp));
-          } else {
-              printf("failed to open empty.txt\n");
-          }
-          return 0;
+      int main() {
+        FILE* fp = fopen("empty.txt", "r");
+        if (fp) {
+            printf("%d\n", fileno(fp));
+        } else {
+            printf("failed to open empty.txt\n");
+        }
+        return 0;
       }
     '''
     self.emcc_args += ['--embed-file', 'empty.txt']
@@ -5794,7 +5780,7 @@ main( int argv, char ** argc ) {
   def test_utf8_textdecoder(self):
     self.set_setting('EXPORTED_RUNTIME_METHODS', ['UTF8ToString', 'stringToUTF8'])
     self.emcc_args += ['--embed-file', test_file('utf8_corpus.txt') + '@/utf8_corpus.txt']
-    self.do_runf(test_file('benchmark_utf8.cpp'), 'OK.')
+    self.do_runf(test_file('benchmark/benchmark_utf8.cpp'), 'OK.')
 
   # Test that invalid character in UTF8 does not cause decoding to crash.
   def test_utf8_invalid(self):
@@ -5818,7 +5804,7 @@ main( int argv, char ** argc ) {
   def test_utf16_textdecoder(self):
     self.set_setting('EXPORTED_RUNTIME_METHODS', ['UTF16ToString', 'stringToUTF16', 'lengthBytesUTF16'])
     self.emcc_args += ['--embed-file', test_file('utf16_corpus.txt') + '@/utf16_corpus.txt']
-    self.do_runf(test_file('benchmark_utf16.cpp'), 'OK.')
+    self.do_runf(test_file('benchmark/benchmark_utf16.cpp'), 'OK.')
 
   def test_wprintf(self):
     self.do_core_test('test_wprintf.cpp')
@@ -5978,9 +5964,9 @@ Module['onRuntimeInitialized'] = function() {
     self.set_setting('ASSERTIONS')
     self.do_run(r'''
       #include <emscripten.h>
-      #include <iostream>
+      #include <stdio.h>
       int main(void) {
-        std::cout << "hello world\n"; // should work with strict mode
+        printf("hello world\n"); // should work with strict mode
         EM_ASM(
           try {
             FS.readFile('/dummy.txt');
@@ -6208,18 +6194,10 @@ Module['onRuntimeInitialized'] = function() {
     self.do_core_test('test_unary_literal.cpp')
 
   def test_env(self):
-    expected = read_file(test_file('env/output.txt'))
-    self.do_runf(test_file('env/src.c'), [
-      expected.replace('{{{ THIS_PROGRAM }}}', self.in_dir('src.js')).replace('\\', '/'), # node, can find itself properly
-      expected.replace('{{{ THIS_PROGRAM }}}', './this.program') # spidermonkey, v8
-    ])
+    self.do_core_test('test_env.c', regex=True)
 
   def test_environ(self):
-    expected = read_file(test_file('env/output-mini.txt'))
-    self.do_runf(test_file('env/src-mini.c'), [
-      expected.replace('{{{ THIS_PROGRAM }}}', self.in_dir('src-mini.js')).replace('\\', '/'), # node, can find itself properly
-      expected.replace('{{{ THIS_PROGRAM }}}', './this.program') # spidermonkey, v8
-    ])
+    self.do_core_test('test_environ.c', regex=True)
 
   def test_systypes(self):
     self.do_core_test('test_systypes.c')
@@ -6275,8 +6253,7 @@ PORT: 3979
     create_file('src.cpp', '''
       #include <iostream>
 
-      int main()
-      {
+      int main() {
         std::cout << "hello world" << std::endl << 77 << "." << std::endl;
         return 0;
       }
@@ -6343,7 +6320,7 @@ PORT: 3979
     self.emcc_args += ['--js-library', 'mylib1.js', '--js-library', 'mylib2.js']
     self.do_runf('main.cpp', 'hello from lib!\n*32*\n')
 
-  @with_env_modify({'LC_CTYPE': 'latin-1', 'PYTHONUTF8': '0', 'PYTHONCOERCECLOCALE': '0'})
+  @with_env_modify({'LC_ALL': 'latin-1', 'PYTHONUTF8': '0', 'PYTHONCOERCECLOCALE': '0'})
   def test_unicode_js_library(self):
     create_file('main.c', '''
       #include <stdio.h>
@@ -7064,7 +7041,7 @@ void* operator new(size_t size) {
 
   def test_ccall(self):
     self.emcc_args.append('-Wno-return-stack-address')
-    self.set_setting('EXPORTED_RUNTIME_METHODS', ['ccall', 'cwrap'])
+    self.set_setting('EXPORTED_RUNTIME_METHODS', ['ccall', 'cwrap', 'STACK_SIZE'])
     self.set_setting('WASM_ASYNC_COMPILATION', 0)
     create_file('post.js', '''
       out('*');
@@ -7121,9 +7098,9 @@ void* operator new(size_t size) {
     self.do_runf(test_file('core/test_ccall.cpp'), 'true')
 
   def test_EXPORTED_RUNTIME_METHODS(self):
-    self.set_setting('DEFAULT_LIBRARY_FUNCS_TO_INCLUDE', ['$dynCall'])
+    self.set_setting('DEFAULT_LIBRARY_FUNCS_TO_INCLUDE', ['$dynCall', '$ASSERTIONS'])
     self.do_core_test('EXPORTED_RUNTIME_METHODS.c')
-    # test dyncall (and other runtime methods in support.js) can be exported
+    # test dyncall (and other runtime methods) can be exported
     self.emcc_args += ['-DEXPORTED']
     self.set_setting('EXPORTED_RUNTIME_METHODS', ['dynCall', 'addFunction', 'lengthBytesUTF8', 'getTempRet0', 'setTempRet0'])
     self.do_core_test('EXPORTED_RUNTIME_METHODS.c')
@@ -8259,9 +8236,9 @@ Module['onRuntimeInitialized'] = function() {
     self.do_runf(test_file('test_fibers.cpp'), '*leaf-0-100-1-101-1-102-2-103-3-104-5-105-8-106-13-107-21-108-34-109-*')
 
   @no_wasm64('TODO: asyncify for wasm64')
+  @with_asyncify_and_stack_switching
   def test_asyncify_unused(self):
     # test a program not using asyncify, but the pref is set
-    self.set_setting('ASYNCIFY')
     self.do_core_test('test_hello_world.c')
 
   @parameterized({
@@ -8379,8 +8356,8 @@ Module['onRuntimeInitialized'] = function() {
   @no_lsan('undefined symbol __global_base')
   @no_wasm2js('dynamic linking support in wasm2js')
   @no_wasm64('TODO: asyncify for wasm64')
+  @with_asyncify_and_stack_switching
   def test_asyncify_main_module(self):
-    self.set_setting('ASYNCIFY', 1)
     self.set_setting('MAIN_MODULE', 2)
     self.do_core_test('test_hello_world.c')
 
@@ -8616,16 +8593,14 @@ Module['onRuntimeInitialized'] = function() {
         out(typeof FS.filesystems['IDBFS']);
         out(typeof FS.filesystems['NODEFS']);
         // Globals
-        if (ASSERTIONS) {
-          console.log(typeof MEMFS);
-          console.log(IDBFS);
-          console.log(NODEFS);
-          FS.mkdir('/working1');
-          try {
-            FS.mount(IDBFS, {}, '/working1');
-          } catch (e) {
-            console.log('|' + e + '|');
-          }
+        console.log(typeof MEMFS);
+        console.log(IDBFS);
+        console.log(NODEFS);
+        FS.mkdir('/working1');
+        try {
+          FS.mount(IDBFS, {}, '/working1');
+        } catch (e) {
+          console.log('|' + e + '|');
         }
       };
     ''')
@@ -9155,7 +9130,9 @@ NODEFS is no longer included by default; build with -lnodefs.js
 
   # Marked as impure since we don't have a wasi-threads is still
   # a WIP.
-  @also_with_standalone_wasm(impure=True)
+  # Test is disabled on standalone because of flakes, see
+  # https://github.com/emscripten-core/emscripten/issues/18405
+  # @also_with_standalone_wasm(impure=True)
   @node_pthreads
   def test_pthread_create(self):
     if not self.get_setting('STANDALONE_WASM'):
@@ -9371,6 +9348,24 @@ NODEFS is no longer included by default; build with -lnodefs.js
 
   @needs_dylink
   @node_pthreads
+  def test_pthread_dlopen_many(self):
+    nthreads = 10
+    self.set_setting('USE_PTHREADS')
+    self.emcc_args.append('-Wno-experimental')
+    self.build_dlfcn_lib(test_file('core/pthread/test_pthread_dlopen_side.c'))
+    for i in range(nthreads):
+      shutil.copyfile('liblib.so', f'liblib{i}.so')
+
+    self.prep_dlfcn_main()
+    self.set_setting('EXIT_RUNTIME')
+    self.set_setting('PROXY_TO_PTHREAD')
+    self.do_runf(test_file('core/pthread/test_pthread_dlopen_many.c'),
+                 ['side module ctor', 'main done', 'side module atexit'],
+                 emcc_args=[f'-DNUM_THREADS={nthreads}'],
+                 assert_all=True)
+
+  @needs_dylink
+  @node_pthreads
   def test_pthread_dlsym(self):
     self.set_setting('USE_PTHREADS')
     self.emcc_args.append('-Wno-experimental')
@@ -9412,7 +9407,7 @@ NODEFS is no longer included by default; build with -lnodefs.js
   def test_Module_dynamicLibraries_pthreads(self):
     # test that Module.dynamicLibraries works with pthreads
     self.emcc_args += ['-pthread', '-Wno-experimental']
-    self.emcc_args += ['--extern-pre-js', 'pre.js']
+    self.emcc_args += ['--pre-js', 'pre.js']
     self.set_setting('PROXY_TO_PTHREAD')
     self.set_setting('EXIT_RUNTIME')
     # This test is for setting dynamicLibraries at runtime so we don't
@@ -9421,14 +9416,12 @@ NODEFS is no longer included by default; build with -lnodefs.js
     self.set_setting('NO_AUTOLOAD_DYLIBS')
 
     create_file('pre.js', '''
-      if (!global.Module) {
-        // This is the initial load (not a worker)
-        // Define the initial state of Module as we would
-        // in the html shell file.
-        // Use var to escape the scope of the if statement
-        var Module = {
-          dynamicLibraries: ['liblib.so']
-        };
+      if (typeof importScripts == 'undefined') { // !ENVIRONMENT_IS_WORKER
+        // Load liblib.so by default on non-workers
+        Module['dynamicLibraries'] = ['liblib.so'];
+      } else {
+        // Verify whether the main thread passes Module.dynamicLibraries to the worker
+        assert(Module['dynamicLibraries'].includes('liblib.so'));
       }
     ''')
 
@@ -9604,6 +9597,7 @@ NODEFS is no longer included by default; build with -lnodefs.js
       '-lembind',
       '-sASYNCIFY',
       '-sASYNCIFY_IMPORTS=["sleep_and_return"]',
+      '-sDEFAULT_LIBRARY_FUNCS_TO_INCLUDE=$ASSERTIONS',
       '--post-js', test_file('core/embind_lib_with_asyncify.test.js'),
     ]
     self.emcc_args += args
@@ -9643,9 +9637,16 @@ NODEFS is no longer included by default; build with -lnodefs.js
     self.run_process([EMCC, '-c', test_file('core/test_main_reads_args_real.c'), '-o', 'real.o'] + self.get_emcc_args(ldflags=False))
     self.do_core_test('test_main_reads_args.c', emcc_args=['real.o', '-sEXIT_RUNTIME'], regex=True)
 
+  @requires_node
+  def test_native_promise(self):
+    self.do_core_test('test_native_promise.c')
+
 
 # Generate tests for everything
-def make_run(name, emcc_args, settings=None, env=None, node_args=None, require_v8=False, v8_args=None):
+def make_run(name, emcc_args, settings=None, env=None,
+             require_v8=False, v8_args=None,
+             require_node=False, node_args=None,
+             require_wasm64=False):
   if env is None:
     env = {}
   if settings is None:
@@ -9687,6 +9688,11 @@ def make_run(name, emcc_args, settings=None, env=None, node_args=None, require_v
 
     if require_v8:
       self.require_v8()
+    elif require_node:
+      self.require_node()
+
+    if require_wasm64:
+      self.require_wasm64()
 
   TT.setUp = setUp
 
@@ -9711,8 +9717,9 @@ corez = make_run('corez', emcc_args=['-Oz'])
 
 # MEMORY64=1
 wasm64 = make_run('wasm64', emcc_args=['-Wno-experimental', '--profiling-funcs'],
-                  settings={'MEMORY64': 1},
-                  require_v8=True, v8_args=['--experimental-wasm-memory64'])
+                  settings={'MEMORY64': 1}, require_wasm64=True, require_node=True)
+wasm64_v8 = make_run('wasm64_v8', emcc_args=['-Wno-experimental', '--profiling-funcs'],
+                     settings={'MEMORY64': 1}, require_wasm64=True, require_v8=True)
 # MEMORY64=2, or "lowered"
 wasm64l = make_run('wasm64l', emcc_args=['-Wno-experimental', '--profiling-funcs'],
                    settings={'MEMORY64': 2},
