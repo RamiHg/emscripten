@@ -18,7 +18,9 @@ set(CMAKE_SYSTEM_NAME Emscripten)
 set(CMAKE_SYSTEM_VERSION 1)
 
 set(CMAKE_CROSSCOMPILING TRUE)
-set_property(GLOBAL PROPERTY TARGET_SUPPORTS_SHARED_LIBS FALSE)
+set_property(GLOBAL PROPERTY TARGET_SUPPORTS_SHARED_LIBS TRUE)
+
+
 
 # Advertise Emscripten as a 32-bit platform (as opposed to
 # CMAKE_SYSTEM_PROCESSOR=x86_64 for 64-bit platform), since some projects (e.g.
@@ -33,7 +35,7 @@ set(CMAKE_SYSTEM_PROCESSOR ${EMSCRIPTEN_SYSTEM_PROCESSOR})
 # of an outputted .so library: e.g. "libfoo.so, libfoo.so.1, libfoo.so.1.4" etc.
 # This feature is activated if a shared library project has the property
 # SOVERSION defined.
-set(CMAKE_SHARED_LIBRARY_SONAME_C_FLAG "-Wl,-soname,")
+# set(CMAKE_SHARED_LIBRARY_SONAME_C_FLAG "-Wl,-soname,")
 
 # In CMake, CMAKE_HOST_WIN32 is set when we are cross-compiling from Win32 to
 # Emscripten:
@@ -426,3 +428,6 @@ if ("${CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES}" STREQUAL "")
   set(CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES "${EMSCRIPTEN_SYSROOT}/include")
 endif()
 unset(_em_sysroot_include)
+
+# set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -sSIDE_MODULE" CACHE STRING "")
+# set(CMAKE_SHARED_LIBRARY_SUFFIX ".wasm" CACHE STRING "")
