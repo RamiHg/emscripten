@@ -95,11 +95,11 @@ LibraryJSEventLoop = {
   emscripten_set_immediate_loop: function(cb, userData) {
     polyfillSetImmediate();
     function tick() {
-      {{{ runtimeKeepalivePop(); }}}
       callUserCallback(function() {
         if ({{{ makeDynCall('ip', 'cb') }}}(userData)) {
-          {{{ runtimeKeepalivePush(); }}}
           emSetImmediate(tick);
+        } else {
+          {{{ runtimeKeepalivePop(); }}}
         }
       });
     }
@@ -156,8 +156,8 @@ LibraryJSEventLoop = {
     clearInterval(id);
   },
 
-  $promiseMap__deps: ['$handleAllocator'],
-  $promiseMap: "new handleAllocator();",
+  $promiseMap__deps: ['$HandleAllocator'],
+  $promiseMap: "new HandleAllocator();",
 
   // Create a new promise that can be resolved or rejected by passing a unique
   // ID to emscripten_promise_resolve/emscripten_promise_reject.  Returns a JS
