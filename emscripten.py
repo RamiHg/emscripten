@@ -366,8 +366,8 @@ def emscript(in_wasm, out_wasm, outfile_js, memfile):
     if settings.INITIAL_TABLE == -1:
       settings.INITIAL_TABLE = dylink_sec.table_size + 1
 
-    if settings.ASYNCIFY:
-      metadata.imports += ['__asyncify_state', '__asyncify_data']
+  if settings.ASYNCIFY:
+    metadata.imports += ['__asyncify_state', '__asyncify_data']
 
   invoke_funcs = metadata.invokeFuncs
   if invoke_funcs:
@@ -393,6 +393,9 @@ def emscript(in_wasm, out_wasm, outfile_js, memfile):
     pre += "}\n"
 
   exports = metadata.exports
+
+  if settings.ASYNCIFY:
+    exports += ['asyncify_start_unwind', 'asyncify_stop_unwind', 'asyncify_start_rewind', 'asyncify_stop_rewind', 'asyncify_get_state', 'asyncify_get_data']
 
   report_missing_symbols(forwarded_json['librarySymbols'])
 
