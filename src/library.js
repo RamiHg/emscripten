@@ -2358,7 +2358,7 @@ mergeInto(LibraryManager.library, {
                                "  };\n" +
                                "} else " +
 #endif
-#if USE_PTHREADS
+#if USE_PTHREADS && !AUDIO_WORKLET
 // Pthreads need their clocks synchronized to the execution of the main thread, so, when using them,
 // make sure to adjust all timings to the respective time origins.
                                "_emscripten_get_now = () => performance.timeOrigin + performance.now();\n",
@@ -2368,9 +2368,15 @@ mergeInto(LibraryManager.library, {
                                "  _emscripten_get_now = dateNow;\n" +
                                "} else " +
 #endif
-#if MIN_IE_VERSION <= 9 || MIN_FIREFOX_VERSION <= 14 || MIN_CHROME_VERSION <= 23 || MIN_SAFARI_VERSION <= 80400 // https://caniuse.com/#feat=high-resolution-time
+#if MIN_IE_VERSION <= 9 || MIN_FIREFOX_VERSION <= 14 || MIN_CHROME_VERSION <= 23 || MIN_SAFARI_VERSION <= 80400 || AUDIO_WORKLET // https://caniuse.com/#feat=high-resolution-time
+// AudioWorkletGlobalScope does not have performance.now() (https://github.com/WebAudio/web-audio-api/issues/2527), so if building with
+// Audio Worklets enabled, do a dynamic check for its presence.
                                "if (typeof performance != 'undefined' && performance.now) {\n" +
+#if USE_PTHREADS
+                               "  _emscripten_get_now = () => performance.timeOrigin + performance.now();\n" +
+#else
                                "  _emscripten_get_now = () => performance.now();\n" +
+#endif
                                "} else {\n" +
                                "  _emscripten_get_now = Date.now;\n" +
                                "}",
@@ -3411,19 +3417,20 @@ mergeInto(LibraryManager.library, {
 
   _emscripten_out__sig: 'vp',
   _emscripten_out: function(str) {
-#if ASSERTIONS
-    assert(typeof str == 'number');
-#endif
     out(UTF8ToString(str));
   },
 
   _emscripten_err__sig: 'vp',
   _emscripten_err: function(str) {
-#if ASSERTIONS
-    assert(typeof str == 'number');
-#endif
     err(UTF8ToString(str));
   },
+
+#if ASSERTIONS || RUNTIME_DEBUG
+  _emscripten_dbg__sig: 'vp',
+  _emscripten_dbg: function(str) {
+    dbg(UTF8ToString(str));
+  },
+#endif
 
   // Use program_invocation_short_name and program_invocation_name in compiled
   // programs. This function is for implementing them.

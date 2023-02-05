@@ -76,7 +76,7 @@ function missingLibrarySymbol(sym) {
       }
     });
   }
-  // Any symbol that is not included from the JS libary is also (by definttion)
+  // Any symbol that is not included from the JS libary is also (by definition)
   // not exported on the Module object.
   unexportedRuntimeSymbol(sym);
 }
@@ -129,7 +129,14 @@ function prettyPrint(arg) {
 #if ASSERTIONS || RUNTIME_DEBUG
 // Used by XXXXX_DEBUG settings to output debug messages.
 function dbg(text) {
-  // TODO(sbc): Make this configurable somehow.  Its not always convient for
+#if ENVIRONMENT_MAY_BE_NODE && USE_PTHREADS
+  // Avoid using the console for debugging in multi-threaded node applications
+  // See https://github.com/emscripten-core/emscripten/issues/14804
+  if (ENVIRONMENT_IS_NODE) {
+    fs.writeSync(2, text + '\n');
+  } else
+#endif
+  // TODO(sbc): Make this configurable somehow.  Its not always convenient for
   // logging to show up as errors.
   console.error(text);
 }

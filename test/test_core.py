@@ -2849,6 +2849,13 @@ The current type of b is: 9
     self.set_setting('EXIT_RUNTIME')
     self.do_run_in_out_file_test(test_file('pthread/test_pthread_proxy_to_pthread.c'))
 
+  @node_pthreads
+  @needs_dylink
+  def test_pthread_tls_dylink(self):
+    self.set_setting('MAIN_MODULE', 2)
+    self.emcc_args.append('-Wno-experimental')
+    self.do_run_in_out_file_test('pthread/test_pthread_tls_dylink.c')
+
   def test_tcgetattr(self):
     self.do_runf(test_file('termios/test_tcgetattr.c'), 'success')
 
@@ -9315,13 +9322,9 @@ NODEFS is no longer included by default; build with -lnodefs.js
     self.emcc_args.append('-fexceptions')
     self.dylink_testf(test_file('core/pthread/test_pthread_dylink_exceptions.cpp'))
 
-  @parameterized({
-    '': (True,),
-    'no_yield': (False,)
-  })
   @needs_dylink
   @node_pthreads
-  def test_pthread_dlopen(self, do_yield):
+  def test_pthread_dlopen(self):
     self.set_setting('USE_PTHREADS')
     self.emcc_args.append('-Wno-experimental')
     self.build_dlfcn_lib(test_file('core/pthread/test_pthread_dlopen_side.c'))
@@ -9329,15 +9332,9 @@ NODEFS is no longer included by default; build with -lnodefs.js
     self.prep_dlfcn_main()
     self.set_setting('EXIT_RUNTIME')
     self.set_setting('PROXY_TO_PTHREAD')
-    if do_yield:
-      self.emcc_args.append('-DYIELD')
-      self.do_runf(test_file('core/pthread/test_pthread_dlopen.c'),
-                   ['side module ctor', 'done join'],
-                   assert_all=True)
-    else:
-      self.do_runf(test_file('core/pthread/test_pthread_dlopen.c'),
-                   'invalid index into function table',
-                   assert_returncode=NON_ZERO)
+    self.do_runf(test_file('core/pthread/test_pthread_dlopen.c'),
+                 ['side module ctor', 'done join', 'side module atexit'],
+                 assert_all=True)
 
   @needs_dylink
   @node_pthreads
@@ -9641,8 +9638,8 @@ NODEFS is no longer included by default; build with -lnodefs.js
     self.do_core_test('test_main_reads_args.c', emcc_args=['real.o', '-sEXIT_RUNTIME'], regex=True)
 
   @requires_node
-  def test_native_promise(self):
-    self.do_core_test('test_native_promise.c')
+  def test_promise(self):
+    self.do_core_test('test_promise.c')
 
 
 # Generate tests for everything

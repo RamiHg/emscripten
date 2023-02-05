@@ -31,6 +31,9 @@ var LibraryPThread = {
   $PThread__deps: ['_emscripten_thread_init',
                    '$killThread',
                    '$cancelThread', '$cleanupThread', '$zeroMemory',
+#if MAIN_MODULE
+                   '$markAsFinshed',
+#endif
                    '$spawnThread',
                    '_emscripten_thread_free_data',
                    'exit',
@@ -84,7 +87,11 @@ var LibraryPThread = {
 #if ASSERTIONS
       PThread.debugInit();
 #endif
-      if (ENVIRONMENT_IS_PTHREAD) {
+      if (ENVIRONMENT_IS_PTHREAD
+#if AUDIO_WORKLET
+        || ENVIRONMENT_IS_AUDIO_WORKLET
+#endif
+        ) {
         PThread.initWorker();
       } else {
         PThread.initMainThread();
@@ -97,6 +104,12 @@ var LibraryPThread = {
       while (pthreadPoolSize--) {
         PThread.allocateUnusedWorker();
       }
+#endif
+#if MAIN_MODULE
+      PThread.outstandingPromises = {};
+      // Finished threads are threads that have finished running but we not yet
+      // joined.
+      PThread.finishedThreads = new Set();
 #endif
     },
 
@@ -231,7 +244,7 @@ var LibraryPThread = {
     // Called by worker.js each time a thread is started.
     threadInitTLS: function() {
 #if PTHREADS_DEBUG
-      dbg('threadInitTLS.');
+      dbg('threadInitTLS');
 #endif
       // Call thread init functions (these are the _emscripten_tls_init for each
       // module loaded.
@@ -269,6 +282,10 @@ var LibraryPThread = {
           spawnThread(d);
         } else if (cmd === 'cleanupThread') {
           cleanupThread(d['thread']);
+#if MAIN_MODULE
+        } else if (cmd === 'markAsFinshed') {
+          markAsFinshed(d['thread']);
+#endif
         } else if (cmd === 'killThread') {
           killThread(d['thread']);
         } else if (cmd === 'cancelThread') {
@@ -540,11 +557,20 @@ var LibraryPThread = {
   },
 
   $cleanupThread: function(pthread_ptr) {
+#if PTHREADS_DEBUG
+    dbg('cleanupThread: ' + ptrToString(pthread_ptr))
+#endif
 #if ASSERTIONS
     assert(!ENVIRONMENT_IS_PTHREAD, 'Internal Error! cleanupThread() can only ever be called from main application thread!');
     assert(pthread_ptr, 'Internal Error! Null pthread_ptr in cleanupThread!');
 #endif
     var worker = PThread.pthreads[pthread_ptr];
+#if MAIN_MODULE
+    PThread.finishedThreads.delete(pthread_ptr);
+    if (pthread_ptr in PThread.outstandingPromises) {
+      PThread.outstandingPromises[pthread_ptr].resolve();
+    }
+#endif
     assert(worker);
     PThread.returnWorkerToPool(worker);
   },
@@ -679,6 +705,7 @@ var LibraryPThread = {
     return ___pthread_create_js(pthread_ptr, attr, startRoutine, arg);
   },
 
+#if OFFSCREENCANVAS_SUPPORT
   // ASan wraps the emscripten_builtin_pthread_create call in
   // __lsan::ScopedInterceptorDisabler.  Unfortunately, that only disables it on
   // the thread that made the call.  __pthread_create_js gets proxied to the
@@ -687,6 +714,7 @@ var LibraryPThread = {
   // pthread's internal allocations as leaks.  If/when we remove all the
   // allocations from __pthread_create_js we could also remove this.
   __pthread_create_js__noleakcheck: true,
+#endif
   __pthread_create_js__sig: 'iiiii',
   __pthread_create_js__deps: ['$spawnThread', 'pthread_self', '$pthreadCreateProxied',
 #if OFFSCREENCANVAS_SUPPORT
@@ -1046,7 +1074,7 @@ var LibraryPThread = {
     // Before we call the thread entry point, make sure any shared libraries
     // have been loaded on this there.  Otherwise our table migth be not be
     // in sync and might not contain the function pointer `ptr` at all.
-    __emscripten_thread_sync_code();
+    __emscripten_dlsync_self();
 #endif
     // pthread entry points are always of signature 'void *ThreadMain(void *arg)'
     // Native codebases sometimes spawn threads with other thread entry point
@@ -1074,6 +1102,99 @@ var LibraryPThread = {
     }
 #endif
   },
+
+#if MAIN_MODULE
+  _emscripten_thread_exit_joinable: function(thread) {
+    // Called when a thread exits and is joinable.  We mark these threads
+    // as finished, which means that are in state where are no longer actually
+    // runnning, but remain around waiting to be joined.  In this state they
+    // cannot run any more proxied work.
+    if (!ENVIRONMENT_IS_PTHREAD) markAsFinshed(thread);
+    else postMessage({ 'cmd': 'markAsFinshed', 'thread': thread });
+  },
+
+  $markAsFinshed: function(pthread_ptr) {
+#if PTHREADS_DEBUG
+    dbg('markAsFinshed: ' + ptrToString(pthread_ptr));
+#endif
+    PThread.finishedThreads.add(pthread_ptr);
+    if (pthread_ptr in PThread.outstandingPromises) {
+      PThread.outstandingPromises[pthread_ptr].resolve();
+    }
+  },
+
+  // Asynchronous version dlsync_threads. Always run on the main thread.
+  // This work happens asynchronously. The `callback` is called once this work
+  // is completed, passing the ctx.
+  // TODO(sbc): Should we make a new form of __proxy attribute for JS library
+  // function that run asynchronously like but blocks the caller until they are
+  // done.  Perhaps "sync_with_ctx"?
+  _emscripten_dlsync_threads_async__sig: 'vppp',
+  _emscripten_dlsync_threads_async__deps: ['_emscripten_proxy_dlsync_async', 'emscripten_promise_create', '$getPromise'],
+  _emscripten_dlsync_threads_async: function(caller, callback, ctx) {
+#if PTHREADS_DEBUG
+    dbg("_emscripten_dlsync_threads_async caller=" + ptrToString(caller));
+#endif
+#if ASSERTIONS
+    assert(!ENVIRONMENT_IS_PTHREAD, 'Internal Error! _emscripten_dlsync_threads_async() can only ever be called from main thread');
+#endif
+
+    const promises = [];
+    assert(Object.keys(PThread.outstandingPromises).length === 0);
+
+    // This first promise resolves once the main thread has loaded all modules.
+    var info = makePromise();
+    promises.push(info.promise);
+    __emscripten_dlsync_self_async(info.id);
+
+
+    // We then create a sequence of promises, one per thread, that resolve once
+    // each thread has performed its sync using _emscripten_proxy_dlsync.
+    // Any new threads that are created after this call will automaticaly be
+    // in sync because we call `__emscripten_dlsync_self` in
+    // invokeEntryPoint before the threads entry point is called.
+    for (const ptr of Object.keys(PThread.pthreads)) {
+      const pthread_ptr = Number(ptr);
+      if (pthread_ptr !== caller && !PThread.finishedThreads.has(pthread_ptr)) {
+        info = makePromise();
+        __emscripten_proxy_dlsync_async(pthread_ptr, info.id);
+        PThread.outstandingPromises[pthread_ptr] = info;
+        promises.push(info.promise);
+      }
+    }
+
+#if PTHREADS_DEBUG
+    dbg('_emscripten_dlsync_threads_async: waiting on ' + promises.length + ' promises');
+#endif
+    // Once all promises are resolved then we know all threads are in sync and
+    // we can call the callback.
+    Promise.all(promises).then(() => {
+      PThread.outstandingPromises = {};
+#if PTHREADS_DEBUG
+      dbg('_emscripten_dlsync_threads_async done: calling callback');
+#endif
+      {{{ makeDynCall('vp', 'callback') }}}(ctx);
+    });
+  },
+
+  // Synchronous version dlsync_threads. This is only needed for the case then
+  // the main thread call dlopen and in that case we have not choice but to
+  // synchronously block the main thread until all other threads are in sync.
+  // When `dlopen` is called from a worker, the worker itself is blocked but
+  // the operation its waiting on (on the main thread) can be async.
+  _emscripten_dlsync_threads__deps: ['_emscripten_proxy_dlsync'],
+  _emscripten_dlsync_threads: function() {
+#if ASSERTIONS
+    assert(!ENVIRONMENT_IS_PTHREAD, 'Internal Error! _emscripten_dlsync_threads() can only ever be called from main thread');
+#endif
+    for (const ptr of Object.keys(PThread.pthreads)) {
+      const pthread_ptr = Number(ptr);
+      if (!PThread.finishedThreads.has(pthread_ptr)) {
+        __emscripten_proxy_dlsync(pthread_ptr);
+      }
+    }
+  },
+#endif // MAIN_MODULE
 
   $executeNotifiedProxyingQueue: function(queue) {
     // Set the notification state to processing.
@@ -1108,7 +1229,6 @@ var LibraryPThread = {
       }
       worker.postMessage({'cmd' : 'processProxyingQueue', 'queue': queue});
     }
-    return 1;
   }
 };
 

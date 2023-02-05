@@ -160,7 +160,7 @@ class other(RunnerCore):
     self.assertTrue(building.is_wasm_dylib(filename))
 
   def do_other_test(self, testname, emcc_args=None, **kwargs):
-    self.do_run_in_out_file_test('other', testname, emcc_args=emcc_args, **kwargs)
+    return self.do_run_in_out_file_test('other', testname, emcc_args=emcc_args, **kwargs)
 
   def run_on_pty(self, cmd):
     master, slave = os.openpty()
@@ -6365,10 +6365,11 @@ int main(int argc,char** argv) {
     self.do_other_test('test_dlopen_async.c')
 
   def test_dlopen_blocking(self):
-    create_file('side.c', 'int foo = 42;\n')
-    self.run_process([EMCC, 'side.c', '-o', 'libside.so', '-sSIDE_MODULE'])
+    self.run_process([EMCC, test_file('other/test_dlopen_blocking_side.c'), '-o', 'libside.so', '-sSIDE_MODULE'])
     self.set_setting('MAIN_MODULE', 2)
     self.set_setting('EXIT_RUNTIME')
+    self.set_setting('NO_AUTOLOAD_DYLIBS')
+    self.emcc_args.append('libside.so')
     # Under node this should work both with and without ASYNCIFY
     # because we can do synchronous readBinary
     self.do_other_test('test_dlopen_blocking.c')
@@ -8062,7 +8063,12 @@ int main() {
       out = self.run_js('a.out.js', assert_returncode=NON_ZERO)
       self.assertContained('no native wasm support detected', out)
 
-  @requires_wasm_eh
+  # FIXME Node v18.13 (LTS as of Jan 2023) has not yet implemented the new
+  # optional 'traceStack' option in WebAssembly.Exception constructor
+  # (https://developer.mozilla.org/en-US/docs/WebAssembly/JavaScript_interface/Exception/Exception)
+  # and embeds stack traces unconditionally. Change this back to
+  # @requires_wasm_eh if this issue is fixed later.
+  @requires_v8
   def test_wasm_exceptions_stack_trace_and_message(self):
     src = r'''
       #include <stdexcept>
@@ -8098,12 +8104,32 @@ int main() {
       'at foo',
       'at main']
 
-    # We attach stack traces to exception objects only when ASSERTIONS is set
-    self.set_setting('ASSERTIONS')
+    # Stack traces are enabled when either of ASSERTIONS or
+    # EXCEPTION_STACK_TRACES is enabled. You can't disable
+    # EXCEPTION_STACK_TRACES when ASSERTIONS is enabled.
+
+    # Prints stack traces
+    self.set_setting('ASSERTIONS', 1)
+    self.set_setting('EXCEPTION_STACK_TRACES', 1)
     self.do_run(src, emcc_args=emcc_args, assert_all=True,
                 assert_returncode=NON_ZERO, expected_output=stack_trace_checks)
 
+    # Prints stack traces
     self.set_setting('ASSERTIONS', 0)
+    self.set_setting('EXCEPTION_STACK_TRACES', 1)
+    self.do_run(src, emcc_args=emcc_args, assert_all=True,
+                assert_returncode=NON_ZERO, expected_output=stack_trace_checks)
+
+    # Not allowed
+    self.set_setting('ASSERTIONS', 1)
+    self.set_setting('EXCEPTION_STACK_TRACES', 0)
+    create_file('src.cpp', src)
+    err = self.expect_fail([EMCC, 'src.cpp'] + self.get_emcc_args())
+    self.assertContained('error: EXCEPTION_STACK_TRACES cannot be disabled when ASSERTIONS are enabled', err)
+
+    # Doesn't print stack traces
+    self.set_setting('ASSERTIONS', 0)
+    self.set_setting('EXCEPTION_STACK_TRACES', 0)
     err = self.do_run(src, emcc_args=emcc_args, assert_returncode=NON_ZERO)
     for check in stack_trace_checks:
       self.assertNotContained(check, err)
@@ -11492,23 +11518,36 @@ exec "$@"
     self.do_other_test('test_syslog.c')
 
   @parameterized({
-    '': (False,),
-    'custom': (True,),
+    '': (False, False),
+    'custom': (True, False),
+    'jspi': (False, True),
   })
-  def test_split_module(self, customLoader):
+  def test_split_module(self, customLoader, jspi):
     self.set_setting('SPLIT_MODULE')
     self.emcc_args += ['-g', '-Wno-experimental']
     self.emcc_args += ['--post-js', test_file('other/test_split_module.post.js')]
     if customLoader:
       self.emcc_args += ['--pre-js', test_file('other/test_load_split_module.pre.js')]
+    if jspi:
+      self.require_v8()
+      self.v8_args.append('--experimental-wasm-stack-switching')
+      self.emcc_args += ['-g', '-sASYNCIFY_DEBUG', '-sASYNCIFY=2', '-sASYNCIFY_EXPORTS=[\'say_hello\']']
     self.emcc_args += ['-sEXPORTED_FUNCTIONS=_malloc,_free']
-    self.do_other_test('test_split_module.c')
+    output = self.do_other_test('test_split_module.c')
+    if jspi:
+      # TODO remove this when https://chromium-review.googlesource.com/c/v8/v8/+/4159854
+      # lands.
+      # d8 doesn't support writing a file yet, so extract it from the output.
+      create_file('profile.data', bytearray(json.loads(output[output.find('['):output.find(']') + 1])), True)
     self.assertExists('test_split_module.wasm')
     self.assertExists('test_split_module.wasm.orig')
     self.assertExists('profile.data')
 
     wasm_split = os.path.join(building.get_binaryen_bin(), 'wasm-split')
-    self.run_process([wasm_split, '--enable-mutable-globals', '--export-prefix=%', 'test_split_module.wasm.orig', '-o1', 'primary.wasm', '-o2', 'secondary.wasm', '--profile=profile.data'])
+    wasm_split_run = [wasm_split, '-g', '--enable-mutable-globals', '--export-prefix=%', 'test_split_module.wasm.orig', '-o1', 'primary.wasm', '-o2', 'secondary.wasm', '--profile=profile.data']
+    if jspi:
+      wasm_split_run += ['--jspi', '--enable-reference-types']
+    self.run_process(wasm_split_run)
 
     os.remove('test_split_module.wasm')
     os.rename('primary.wasm', 'test_split_module.wasm')
@@ -11517,6 +11556,8 @@ exec "$@"
     self.assertNotIn('profile', result)
     self.assertContainedIf('Custom handler for loading split module.', result, condition=customLoader)
     self.assertIn('Hello! answer: 42', result)
+    if jspi:
+      self.assertIn('result is promise', result)
 
   def test_split_main_module(self):
     # Set and reasonably large initial table size to avoid test fragility.
@@ -12471,7 +12512,7 @@ int main() {
     self.set_setting('INCOMING_MODULE_JS_API', 'fetchSettings')
     self.do_runf(test_file('hello_world.c'), 'hello, world')
     src = read_file('hello_world.js')
-    self.assertContained("fetch(wasmBinaryFile, Module['fetchSettings'] || ", src)
+    self.assertContained("fetch(binaryFile, Module['fetchSettings'] || ", src)
 
   # Tests using the #warning directive in JS library files
   def test_warning_in_js_libraries(self):
@@ -12864,15 +12905,32 @@ foo/version.txt
     dbg('start');
     Module.onRuntimeInitialized = () => dbg('done init');
     ''')
+    expected = '''\
+start
+w:0,t:0x[0-9a-fA-F]+: done init
+hello, world!
+w:0,t:0x[0-9a-fA-F]+: native dbg message
+w:0,t:0x[0-9a-fA-F]+: formatted: 42
+'''
     self.emcc_args.append('--pre-js=pre.js')
     # Verify that, after initialization, dbg() messages are prefixed with
     # worker and thread ID.
-    self.do_runf(test_file('hello_world.c'),
-                 'start\nw:0,t:0x[0-9a-fA-F]+: done init\nhello, world!\n',
-                 regex=True)
+    self.do_runf(test_file('other/test_dbg.c'), expected, regex=True)
 
     # When assertions are disabled `dbg` function is not defined
-    self.do_runf(test_file('hello_world.c'),
+    self.do_runf(test_file('other/test_dbg.c'),
                  'ReferenceError: dbg is not defined',
-                 emcc_args=['-sASSERTIONS=0'],
+                 emcc_args=['-DNDEBUG', '-sASSERTIONS=0'],
                  assert_returncode=NON_ZERO)
+
+  def test_standalone_settings(self):
+    base_cmd = [EMCC, test_file('hello_world.c'), '-sSTANDALONE_WASM']
+
+    err = self.expect_fail(base_cmd + ['-sMINIMAL_RUNTIME'])
+    self.assertContained('error: MINIMAL_RUNTIME reduces JS size, and is incompatible with STANDALONE_WASM which focuses on ignoring JS anyhow and being 100% wasm', err)
+
+    err = self.expect_fail(base_cmd + ['-sMEMORY_GROWTH_GEOMETRIC_CAP=1mb'])
+    self.assertContained('error: MEMORY_GROWTH_GEOMETRIC_CAP is not compatible with STANDALONE_WASM', err)
+
+    err = self.expect_fail(base_cmd + ['-sMEMORY_GROWTH_LINEAR_STEP=1mb'])
+    self.assertContained('error: MEMORY_GROWTH_LINEAR_STEP is not compatible with STANDALONE_WASM', err)

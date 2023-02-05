@@ -20,6 +20,12 @@ See docs/process.md for more on how version tagging works.
 
 3.1.32 (in development)
 -----------------------
+- In Wasm exception mode (`-fwasm-exceptions`), when
+  `EXCEPTION_STACK_TRACES` is enabled, uncaught exceptions will display stack
+  traces. This defaults to true when `ASSERTIONS` is enabled. This option is
+  mainly for the users who want only exceptions' stack traces without turning
+  `ASSERTIONS` on. This option currently works only for Wasm exceptions
+  (-fwasm-exceptions). (#18642)
 
 3.1.31 - 01/26/23
 -----------------
@@ -34,6 +40,8 @@ See docs/process.md for more on how version tagging works.
 - --pre-js and --post-js files are now fed through the JS preprocesor, just
   like JS library files and the core runtime JS files.  This means they can
   now contain #if/#else/#endif blocks and {{{ }}} macro blocks. (#18525)
+- Added support for Wasm-based AudioWorklets for realtime audio processing
+  (#16449)
 - `-sEXPORT_ALL` can now be used to export symbols on the `Module` object
   when used with `-sMINIMA_RUNTIME` and `-sMODULARIZE` together. (#17911)
 - The llvm version that emscripten uses was updated to 17.0.0 trunk.

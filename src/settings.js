@@ -708,6 +708,13 @@ var EXCEPTION_CATCHING_ALLOWED = [];
 // example usage.
 var EXPORT_EXCEPTION_HANDLING_HELPERS = false;
 
+// When this is enabled, exceptions will contain stack traces and uncaught
+// exceptions will display stack traces upon exiting. This defaults to true when
+// ASSERTIONS is enabled. This option is for users who want exceptions' stack
+// traces but do not want other overheads ASSERTIONS can incur. This currently
+// works only for Wasm exceptions (-fwasm-exceptions).
+var EXCEPTION_STACK_TRACES = false;
+
 // Internal: Tracks whether Emscripten should link in exception throwing (C++
 // 'throw') support library. This does not need to be set directly, but pass
 // -fno-exceptions to the build disable exceptions support. (This is basically
@@ -1525,6 +1532,15 @@ var USE_PTHREADS = false;
 // of Wasm SharedArrayBuffer + Atomics API.
 // [compile+link] - affects user code at compile and system libraries at link.
 var WASM_WORKERS = 0;
+
+// If true, enables targeting Wasm Web Audio AudioWorklets. Check out the
+// full documentation in site/source/docs/api_reference/wasm_audio_worklets.rst
+// [link]
+var AUDIO_WORKLET = 0;
+
+// If true, enables deep debugging of Web Audio backend.
+// [link]
+var WEBAUDIO_DEBUG = 0;
 
 // In web browsers, Workers cannot be created while the main browser thread
 // is executing JS/Wasm code, but the main thread must regularly yield back

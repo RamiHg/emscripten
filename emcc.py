@@ -104,7 +104,7 @@ DEFAULT_ASYNCIFY_IMPORTS = [
   'emscripten_idb_store', 'emscripten_idb_delete', 'emscripten_idb_exists',
   'emscripten_idb_load_blob', 'emscripten_idb_store_blob', 'SDL_Delay',
   'emscripten_scan_registers', 'emscripten_lazy_load_code',
-  'emscripten_fiber_swap',
+  'emscripten_fiber_swap', '__load_secondary_module',
   'wasi_snapshot_preview1.fd_sync', '__wasi_fd_sync', '_emval_await',
   '_dlopen_js', '__asyncjs__*'
 ]
@@ -706,6 +706,9 @@ def get_binaryen_passes():
     passes += ['--jspi']
     passes += ['--pass-arg=jspi-imports@%s' % ','.join(settings.ASYNCIFY_IMPORTS)]
     passes += ['--pass-arg=jspi-exports@%s' % ','.join(settings.ASYNCIFY_EXPORTS)]
+    if settings.SPLIT_MODULE:
+      passes += ['--pass-arg=jspi-split-module']
+
   if settings.BINARYEN_IGNORE_IMPLICIT_TRAPS:
     passes += ['--ignore-implicit-traps']
   # normally we can assume the memory, if imported, has not been modified
@@ -751,9 +754,12 @@ def make_js_executable(script):
     pass # can fail if e.g. writing the executable to /dev/null
 
 
-def do_split_module(wasm_file):
+def do_split_module(wasm_file, options):
   os.rename(wasm_file, wasm_file + '.orig')
   args = ['--instrument']
+  if options.requested_debug:
+    # Tell wasm-split to preserve function names.
+    args += ['-g']
   building.run_binaryen_command('wasm-split', wasm_file + '.orig', outfile=wasm_file, args=args)
 
 
@@ -1589,6 +1595,8 @@ def phase_setup(options, state, newargs):
       exit_with_error('DISABLE_EXCEPTION_CATCHING is not compatible with -fwasm-exceptions')
     if 'DISABLE_EXCEPTION_THROWING' in user_settings:
       exit_with_error('DISABLE_EXCEPTION_THROWING is not compatible with -fwasm-exceptions')
+    if 'ASYNCIFY' in user_settings and user_settings['ASYNCIFY'] == '1':
+      diagnostics.warning('emcc', 'ASYNCIFY=1 is not compatible with -fwasm-exceptions. Parts of the program that mix ASYNCIFY and exceptions will not compile.')
     settings.DISABLE_EXCEPTION_CATCHING = 1
     settings.DISABLE_EXCEPTION_THROWING = 1
 
@@ -1645,7 +1653,13 @@ def setup_pthreads(target):
   ]
 
   if settings.MAIN_MODULE:
-    settings.REQUIRED_EXPORTS += ['_emscripten_thread_sync_code', '__dl_seterr']
+    settings.REQUIRED_EXPORTS += [
+      '_emscripten_dlsync_self',
+      '_emscripten_dlsync_self_async',
+      '_emscripten_proxy_dlsync',
+      '_emscripten_proxy_dlsync_async',
+      '__dl_seterr',
+    ]
 
   settings.DEFAULT_LIBRARY_FUNCS_TO_INCLUDE += [
     '$exitOnMainThread',
@@ -1885,6 +1899,16 @@ def phase_linker_setup(options, state, newargs):
     if 'EXIT_RUNTIME' in user_settings:
       exit_with_error('Explictly setting EXIT_RUNTIME not compatible with STANDALONE_WASM.  EXIT_RUNTIME will always be True for programs (with a main function) and False for reactors (not main function).')
     settings.EXIT_RUNTIME = settings.EXPECT_MAIN
+    settings.IGNORE_MISSING_MAIN = 0
+    # the wasm must be runnable without the JS, so there cannot be anything that
+    # requires JS legalization
+    settings.LEGALIZE_JS_FFI = 0
+    if 'MEMORY_GROWTH_LINEAR_STEP' in user_settings:
+      exit_with_error('MEMORY_GROWTH_LINEAR_STEP is not compatible with STANDALONE_WASM')
+    if 'MEMORY_GROWTH_GEOMETRIC_CAP' in user_settings:
+      exit_with_error('MEMORY_GROWTH_GEOMETRIC_CAP is not compatible with STANDALONE_WASM')
+    if settings.MINIMAL_RUNTIME:
+      exit_with_error('MINIMAL_RUNTIME reduces JS size, and is incompatible with STANDALONE_WASM which focuses on ignoring JS anyhow and being 100% wasm')
 
   # Note the exports the user requested
   building.user_requested_exports.update(settings.EXPORTED_FUNCTIONS)
@@ -1900,9 +1924,6 @@ def phase_linker_setup(options, state, newargs):
     # in libcompiler-rt.
     if not settings.PURE_WASI and '-nostdlib' not in newargs and '-nodefaultlibs' not in newargs:
       default_setting('STACK_OVERFLOW_CHECK', max(settings.ASSERTIONS, settings.STACK_OVERFLOW_CHECK))
-
-  if settings.STANDALONE_WASM:
-    settings.IGNORE_MISSING_MAIN = 0
 
   # For users that opt out of WARN_ON_UNDEFINED_SYMBOLS we assume they also
   # want to opt out of ERROR_ON_UNDEFINED_SYMBOLS.
@@ -2270,10 +2291,6 @@ def phase_linker_setup(options, state, newargs):
 
   settings.REQUIRED_EXPORTS += ['stackSave', 'stackRestore', 'stackAlloc']
 
-  if not settings.STANDALONE_WASM:
-    # in standalone mode, crt1 will call the constructors from inside the wasm
-    settings.REQUIRED_EXPORTS.append('__wasm_call_ctors')
-
   if settings.RELOCATABLE:
     # TODO(https://reviews.llvm.org/D128515): Make this mandatory once
     # llvm change lands
@@ -2343,7 +2360,7 @@ def phase_linker_setup(options, state, newargs):
   if settings.WASM_WORKERS:
     # TODO: After #15982 is resolved, these dependencies can be declared in library_wasm_worker.js
     #       instead of having to record them here.
-    wasm_worker_imports = ['_emscripten_wasm_worker_initialize']
+    wasm_worker_imports = ['_emscripten_wasm_worker_initialize', '___set_thread_state']
     settings.EXPORTED_FUNCTIONS += wasm_worker_imports
     building.user_requested_exports.update(wasm_worker_imports)
     settings.DEFAULT_LIBRARY_FUNCS_TO_INCLUDE += ['_wasm_worker_initializeRuntime']
@@ -2351,6 +2368,19 @@ def phase_linker_setup(options, state, newargs):
     if settings.WASM_WORKERS == 1:
       settings.WASM_WORKER_FILE = unsuffixed(os.path.basename(target)) + '.ww.js'
     settings.JS_LIBRARIES.append((0, shared.path_from_root('src', 'library_wasm_worker.js')))
+
+  settings.SUPPORTS_GLOBALTHIS = feature_matrix.caniuse(feature_matrix.Feature.GLOBALTHIS)
+
+  if settings.AUDIO_WORKLET:
+    if not settings.SUPPORTS_GLOBALTHIS:
+      exit_with_error('Must target recent enough browser versions that will support globalThis in order to target Wasm Audio Worklets!')
+    if settings.AUDIO_WORKLET == 1:
+      settings.AUDIO_WORKLET_FILE = unsuffixed(os.path.basename(target)) + '.aw.js'
+    settings.JS_LIBRARIES.append((0, shared.path_from_root('src', 'library_webaudio.js')))
+    if not settings.MINIMAL_RUNTIME:
+      # MINIMAL_RUNTIME exports these manually, since this export mechanism is placed
+      # in global scope that is not suitable for MINIMAL_RUNTIME loader.
+      settings.EXPORTED_RUNTIME_METHODS += ['stackSave', 'stackAlloc', 'stackRestore']
 
   if settings.FORCE_FILESYSTEM and not settings.MINIMAL_RUNTIME:
     # when the filesystem is forced, we export by default methods that filesystem usage
@@ -2453,13 +2483,6 @@ def phase_linker_setup(options, state, newargs):
      (options.shell_path == utils.path_from_root('src/shell.html') or options.shell_path == utils.path_from_root('src/shell_minimal.html')):
     exit_with_error(f'Due to collision in variable name "Module", the shell file "{options.shell_path}" is not compatible with build options "-sMODULARIZE -sEXPORT_NAME=Module". Either provide your own shell file, change the name of the export to something else to avoid the name collision. (see https://github.com/emscripten-core/emscripten/issues/7950 for details)')
 
-  if settings.STANDALONE_WASM:
-    if settings.MINIMAL_RUNTIME:
-      exit_with_error('MINIMAL_RUNTIME reduces JS size, and is incompatible with STANDALONE_WASM which focuses on ignoring JS anyhow and being 100% wasm')
-    # the wasm must be runnable without the JS, so there cannot be anything that
-    # requires JS legalization
-    settings.LEGALIZE_JS_FFI = 0
-
   # TODO(sbc): Remove WASM2JS here once the size regression it would introduce has been fixed.
   if settings.SHARED_MEMORY or settings.RELOCATABLE or settings.ASYNCIFY_LAZY_LOAD_CODE or settings.WASM2JS:
     settings.IMPORTED_MEMORY = 1
@@ -2526,6 +2549,9 @@ def phase_linker_setup(options, state, newargs):
 
   if settings.LEGALIZE_JS_FFI:
     settings.REQUIRED_EXPORTS += ['__get_temp_ret', '__set_temp_ret']
+
+  if settings.SPLIT_MODULE and settings.ASYNCIFY == 2:
+    settings.DEFAULT_LIBRARY_FUNCS_TO_INCLUDE += ['_load_secondary_module']
 
   # wasm side modules have suffix .wasm
   if settings.SIDE_MODULE and shared.suffix(target) == '.js':
@@ -2785,9 +2811,13 @@ def phase_linker_setup(options, state, newargs):
   if settings.WASM_EXCEPTIONS:
     settings.REQUIRED_EXPORTS += ['__trap']
 
-  # When ASSERTIONS is set, we include stack traces in Wasm exception objects
-  # using the JS API, which needs this C++ tag exported.
-  if settings.ASSERTIONS and settings.WASM_EXCEPTIONS:
+  # When ASSERTIONS or EXCEPTION_STACK_TRACES is set, we include stack traces in
+  # Wasm exception objects using the JS API, which needs this C++ tag exported.
+  if settings.ASSERTIONS:
+    if 'EXCEPTION_STACK_TRACES' in user_settings and not settings.EXCEPTION_STACK_TRACES:
+      exit_with_error('EXCEPTION_STACK_TRACES cannot be disabled when ASSERTIONS are enabled')
+    default_setting('EXCEPTION_STACK_TRACES', 1)
+  if settings.EXCEPTION_STACK_TRACES and settings.WASM_EXCEPTIONS:
     settings.EXPORTED_FUNCTIONS += ['___cpp_exception']
     settings.EXPORT_EXCEPTION_HANDLING_HELPERS = True
 
@@ -3126,6 +3156,17 @@ def phase_final_emitting(options, state, target, wasm_target, memfile):
       minified_worker = building.acorn_optimizer(worker_output, ['minifyWhitespace'], return_output=True)
       write_file(worker_output, minified_worker)
 
+  # Deploy the Audio Worklet module bootstrap file (*.aw.js)
+  if settings.AUDIO_WORKLET == 1:
+    worklet_output = os.path.join(target_dir, settings.AUDIO_WORKLET_FILE)
+    with open(worklet_output, 'w') as f:
+      f.write(shared.read_and_preprocess(shared.path_from_root('src', 'audio_worklet.js'), expand_macros=True))
+
+    # Minify the audio_worklet.js file in optimized builds
+    if (settings.OPT_LEVEL >= 1 or settings.SHRINK_LEVEL >= 1) and not settings.DEBUG_LEVEL:
+      minified_worker = building.acorn_optimizer(worklet_output, ['minifyWhitespace'], return_output=True)
+      open(worklet_output, 'w').write(minified_worker)
+
   # track files that will need native eols
   generated_text_files_with_native_eols = []
 
@@ -3192,7 +3233,7 @@ def phase_final_emitting(options, state, target, wasm_target, memfile):
 
   if settings.SPLIT_MODULE:
     diagnostics.warning('experimental', 'The SPLIT_MODULE setting is experimental and subject to change')
-    do_split_module(wasm_target)
+    do_split_module(wasm_target, options)
 
   for f in generated_text_files_with_native_eols:
     tools.line_endings.convert_line_endings_in_file(f, os.linesep, options.output_eol)
@@ -3783,11 +3824,16 @@ def modularize():
 
   return %(return_value)s
 }
+%(capture_module_function_for_audio_worklet)s
 ''' % {
     'maybe_async': async_emit,
     'EXPORT_NAME': settings.EXPORT_NAME,
     'src': src,
-    'return_value': return_value
+    'return_value': return_value,
+    # Given the async nature of how the Module function and Module object come into existence in AudioWorkletGlobalScope,
+    # store the Module function under a different variable name so that AudioWorkletGlobalScope will be able to reference
+    # it without aliasing/conflicting with the Module variable name.
+    'capture_module_function_for_audio_worklet': 'globalThis.AudioWorkletModule = Module;' if settings.AUDIO_WORKLET and settings.MODULARIZE else ''
   }
 
   if settings.MINIMAL_RUNTIME and not settings.USE_PTHREADS:
@@ -3847,14 +3893,15 @@ def module_export_name_substitution():
   logger.debug(f'Private module export name substitution with {settings.EXPORT_NAME}')
   src = read_file(final_js)
   final_js += '.module_export_name_substitution.js'
-  if settings.MINIMAL_RUNTIME and not settings.ENVIRONMENT_MAY_BE_NODE and not settings.ENVIRONMENT_MAY_BE_SHELL:
+  if settings.MINIMAL_RUNTIME and not settings.ENVIRONMENT_MAY_BE_NODE and not settings.ENVIRONMENT_MAY_BE_SHELL and not settings.AUDIO_WORKLET:
     # On the web, with MINIMAL_RUNTIME, the Module object is always provided
     # via the shell html in order to provide the .asm.js/.wasm content.
     replacement = settings.EXPORT_NAME
   else:
     replacement = "typeof %(EXPORT_NAME)s !== 'undefined' ? %(EXPORT_NAME)s : {}" % {"EXPORT_NAME": settings.EXPORT_NAME}
-  src = re.sub(r'{\s*[\'"]?__EMSCRIPTEN_PRIVATE_MODULE_EXPORT_NAME_SUBSTITUTION__[\'"]?:\s*1\s*}', replacement, src)
-  write_file(final_js, src)
+  new_src = re.sub(r'{\s*[\'"]?__EMSCRIPTEN_PRIVATE_MODULE_EXPORT_NAME_SUBSTITUTION__[\'"]?:\s*1\s*}', replacement, src)
+  assert new_src != src, 'Unable to find Closure syntax __EMSCRIPTEN_PRIVATE_MODULE_EXPORT_NAME_SUBSTITUTION__ in source!'
+  write_file(final_js, new_src)
   shared.get_temp_files().note(final_js)
   save_intermediate('module_export_name_substitution')
 
