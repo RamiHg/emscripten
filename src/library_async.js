@@ -195,14 +195,13 @@ mergeInto(LibraryManager.library, {
     asyncPromiseHandlers: null, // { resolve, reject } pair for when *all* asynchronicity is done
     sleepCallbacks: [], // functions to call every time we sleep
 
-    getCallStackId: function(funcName) {
-      var id = Asyncify.callStackNameToId[funcName];
-      if (id === undefined) {
-        id = Asyncify.callStackId++;
-        Asyncify.callStackNameToId[funcName] = id;
-        Asyncify.callStackIdToName[id] = funcName;
-      }
-      return id;
+    getCallStackId__deps: ['lengthBytesUTF8', 'stringToUTF8'],
+    getCallStackId: function(funcName, name_ptr) {
+      var name_len = lengthBytesUTF8(funcName) + 1;
+      if (name_len > 256) name_len = 256;
+      // var name_ptr = _malloc(name_len + 1);
+      stringToUTF8(funcName, name_ptr, name_len);
+      return name_ptr;
     },
 
     maybeStopUnwind: function() {
@@ -254,6 +253,8 @@ mergeInto(LibraryManager.library, {
       // This struct is also defined as asyncify_data_t in emscripten/fiber.h
       var ptr = _malloc({{{ C_STRUCTS.asyncify_data_s.__size__ }}} + Asyncify.StackSize);
       Asyncify.setDataHeader(ptr, ptr + {{{ C_STRUCTS.asyncify_data_s.__size__ }}}, Asyncify.StackSize);
+      var name_ptr = _malloc(256);
+      {{{ makeSetValue('ptr', C_STRUCTS.asyncify_data_s.rewind_id, 'name_ptr', 'i32') }}};
       Asyncify.setDataRewindFunc(ptr);
       return ptr;
     },
@@ -268,16 +269,19 @@ mergeInto(LibraryManager.library, {
 #if ASYNCIFY_DEBUG >= 2
       dbg('ASYNCIFY: setDataRewindFunc('+ptr+'), bottomOfCallStack is', bottomOfCallStack, new Error().stack);
 #endif
-      var rewindId = Asyncify.getCallStackId(bottomOfCallStack);
-      {{{ makeSetValue('ptr', C_STRUCTS.asyncify_data_s.rewind_id, 'rewindId', 'i32') }}};
+    var name_ptr = {{{ makeGetValue('ptr', C_STRUCTS.asyncify_data_s.rewind_id, 'i32') }}};
+      var rewindId = Asyncify.getCallStackId(bottomOfCallStack, name_ptr);
+      // {{{ makeSetValue('ptr', C_STRUCTS.asyncify_data_s.rewind_id, 'rewindId', 'i32') }}};
     },
 
 #if RELOCATABLE
     getDataRewindFunc__deps: [ '$resolveGlobalSymbol' ],
 #endif
     getDataRewindFunc: function(ptr) {
-      var id = {{{ makeGetValue('ptr', C_STRUCTS.asyncify_data_s.rewind_id, 'i32') }}};
-      var name = Asyncify.callStackIdToName[id];
+      var name_ptr = {{{ makeGetValue('ptr', C_STRUCTS.asyncify_data_s.rewind_id, 'i32') }}};
+      assert(name_ptr !== 0);
+      // {{{ makeSetValue('ptr', C_STRUCTS.asyncify_data_s.rewind_id, '0', 'i32') }}};
+      var name = UTF8ToString(name_ptr);
       var func = Module['asm'][name];
 #if RELOCATABLE
       // Exported functions in side modules are not listed in `Module["asm"]`,
@@ -402,6 +406,7 @@ mergeInto(LibraryManager.library, {
 #endif
         Asyncify.state = Asyncify.State.Normal;
         runAndAbortIfError(_asyncify_stop_rewind);
+        _free({{{ makeGetValue('Asyncify.currData', C_STRUCTS.asyncify_data_s.rewind_id, 'i32') }}} );
         _free(Asyncify.currData);
         Asyncify.currData = null;
         // Call all sleep callbacks now that the sleep-resume is all done.
