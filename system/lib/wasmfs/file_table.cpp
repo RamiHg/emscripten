@@ -2,9 +2,8 @@
 // Emscripten is available under two separate licenses, the MIT license and the
 // University of Illinois/NCSA Open Source License.  Both these licenses can be
 // found in the LICENSE file.
-// This file defines the open file table of the new file system.
-// Current Status: Work in Progress.
-// See https://github.com/emscripten-core/emscripten/issues/15041.
+
+// This file defines the open file table.
 
 #include "file_table.h"
 #include "special_files.h"
@@ -58,6 +57,32 @@ FileTable::Handle::addEntry(std::shared_ptr<OpenFileState> openFileState) {
     }
   }
   return -EBADF;
+}
+
+int OpenFileState::create(std::shared_ptr<File> file,
+                          oflags_t flags,
+                          std::shared_ptr<OpenFileState>& out) {
+  assert(file);
+  std::vector<Directory::Entry> dirents;
+  if (auto f = file->dynCast<DataFile>()) {
+    if (int err = f->locked().open(flags & O_ACCMODE)) {
+      return err;
+    }
+  } else if (auto d = file->dynCast<Directory>()) {
+    // We are opening a directory; cache its contents for subsequent reads.
+    auto lockedDir = d->locked();
+    dirents = {{".", File::DirectoryKind, d->getIno()},
+               {"..", File::DirectoryKind, lockedDir.getParent()->getIno()}};
+    auto entries = lockedDir.getEntries();
+    if (int err = entries.getError()) {
+      return err;
+    }
+    dirents.insert(dirents.end(), entries->begin(), entries->end());
+  }
+
+  out = std::make_shared<OpenFileState>(
+    private_key{0}, flags, file, std::move(dirents));
+  return 0;
 }
 
 } // namespace wasmfs

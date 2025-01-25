@@ -3,7 +3,7 @@
 # University of Illinois/NCSA Open Source License.  Both these licenses can be
 # found in the LICENSE file.
 
-"""Utilties for manipulating WebAssembly binaries from python.
+"""Utilities for manipulating WebAssembly binaries from python.
 """
 
 from collections import namedtuple
@@ -13,6 +13,7 @@ import logging
 import os
 import sys
 
+from .utils import memoize
 from . import utils
 
 sys.path.append(utils.path_from_root('third_party'))
@@ -53,19 +54,6 @@ def read_uleb(iobuf):
 
 def read_sleb(iobuf):
   return leb128.i.decode_reader(iobuf)[0]
-
-
-def memoize(method):
-
-  @wraps(method)
-  def wrapper(self, *args, **kwargs):
-    assert not kwargs
-    key = method
-    if key not in self._cache:
-      self._cache[key] = method(self, *args, **kwargs)
-    return self._cache[key]
-
-  return wrapper
 
 
 def once(method):
@@ -109,7 +97,7 @@ class OpCode(IntEnum):
   F32_CONST = 0x43
   F64_CONST = 0x44
   I32_ADD = 0x6a
-  I64_ADD = 0x6b
+  I64_ADD = 0x7c
   REF_NULL = 0xd0
   ATOMIC_PREFIX = 0xfe
   MEMORY_PREFIX = 0xfc
@@ -160,6 +148,11 @@ class DylinkType(IntEnum):
   NEEDED = 2
   EXPORT_INFO = 3
   IMPORT_INFO = 4
+
+
+class TargetFeaturePrefix(IntEnum):
+  USED = 0x2b
+  DISALLOWED = 0x2d
 
 
 class InvalidWasmError(BaseException):
@@ -236,8 +229,10 @@ class Module:
     while 1:
       opcode = OpCode(self.read_byte())
       args = []
-      if opcode in (OpCode.GLOBAL_GET, OpCode.I32_CONST, OpCode.I64_CONST):
+      if opcode == OpCode.GLOBAL_GET:
         args.append(self.read_uleb())
+      elif opcode in (OpCode.I32_CONST, OpCode.I64_CONST):
+        args.append(self.read_sleb())
       elif opcode in (OpCode.REF_NULL,):
         args.append(self.read_type())
       elif opcode in (OpCode.END, OpCode.I32_ADD, OpCode.I64_ADD):
@@ -285,15 +280,11 @@ class Module:
       type_form = self.read_byte()
       assert type_form == 0x60
 
-      params = []
       num_params = self.read_uleb()
-      for _ in range(num_params):
-        params.append(self.read_type())
+      params = [self.read_type() for _ in range(num_params)]
 
-      returns = []
       num_returns = self.read_uleb()
-      for _ in range(num_returns):
-        returns.append(self.read_type())
+      returns = [self.read_type() for _ in range(num_returns)]
 
       types.append(FuncType(params, returns))
 
@@ -517,10 +508,7 @@ class Module:
 
     self.seek(function_section.offset)
     num_types = self.read_uleb()
-    func_types = []
-    for _ in range(num_types):
-      func_types.append(self.read_uleb())
-    return func_types
+    return [self.read_uleb() for _ in range(num_types)]
 
   def has_name_section(self):
     return self.get_custom_section('name') is not None
@@ -559,6 +547,18 @@ class Module:
       func_type = self.get_function_types()[idx - self.num_imported_funcs()]
     return self.get_types()[func_type]
 
+  def get_target_features(self):
+    section = self.get_custom_section('target_features')
+    self.seek(section.offset)
+    assert self.read_string() == 'target_features'
+    features = {}
+    self.read_byte() # ignore feature count
+    while self.tell() < section.offset + section.size:
+      prefix = TargetFeaturePrefix(self.read_byte())
+      feature = self.read_string()
+      features[feature] = prefix
+    return features
+
 
 def parse_dylink_section(wasm_file):
   with Module(wasm_file) as module:
@@ -573,3 +573,13 @@ def get_exports(wasm_file):
 def get_imports(wasm_file):
   with Module(wasm_file) as module:
     return module.get_imports()
+
+
+def get_weak_imports(wasm_file):
+  weak_imports = []
+  dylink_sec = parse_dylink_section(wasm_file)
+  for symbols in dylink_sec.import_info.values():
+    for symbol, flags in symbols.items():
+      if flags & SYMBOL_BINDING_MASK == SYMBOL_BINDING_WEAK:
+        weak_imports.append(symbol)
+  return weak_imports

@@ -31,7 +31,7 @@ import sys
 
 __scriptdir__ = os.path.dirname(os.path.abspath(__file__))
 __rootdir__ = os.path.dirname(__scriptdir__)
-sys.path.append(__rootdir__)
+sys.path.insert(0, __rootdir__)
 
 from tools import shared, building
 
@@ -41,7 +41,7 @@ opts = sys.argv[3:]
 
 # main
 
-cmd = [os.path.join(building.get_binaryen_bin(), 'wasm2js'), '--emscripten', wasm_file]
+cmd = [os.path.join(building.get_binaryen_bin(), 'wasm2js'), '--emscripten', '-all', wasm_file]
 cmd += opts
 js = shared.run_process(cmd, stdout=subprocess.PIPE).stdout
 # assign the instantiate function to where it will be used

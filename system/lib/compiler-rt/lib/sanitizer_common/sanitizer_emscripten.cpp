@@ -26,20 +26,15 @@
 #include <emscripten/stack.h>
 #include <sys/types.h>
 
-namespace __sanitizer {
+#include "emscripten_internal.h"
 
-extern "C" {
-char* emscripten_get_module_name(char *buf, size_t length);
-void* emscripten_builtin_mmap(void *addr, size_t length, int prot, int flags,
-                             int fd, off_t offset);
-int emscripten_builtin_munmap(void *addr, size_t length);
-}
+namespace __sanitizer {
 
 void ListOfModules::init() {
   modules_.Initialize(2);
 
   char name[256];
-  emscripten_get_module_name(name, 256);
+  _emscripten_get_progname(name, 256);
 
   LoadedModule main_module;
   main_module.set(name, 0);
@@ -131,6 +126,8 @@ u64 MonotonicNanoTime() {
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return (u64)ts.tv_sec * (1000ULL * 1000 * 1000) + ts.tv_nsec;
 }
+
+void GetMemoryProfile(fill_profile_f cb, uptr *stats) {}
 
 } // namespace __sanitizer
 

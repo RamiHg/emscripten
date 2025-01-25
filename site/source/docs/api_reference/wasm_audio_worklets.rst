@@ -45,7 +45,9 @@ processing graph as AudioWorkletNodes.
 
 Once a class type is instantiated on the Web Audio graph and the graph is
 running, a C/C++ function pointer callback will be invoked for each 128
-samples of the processed audio stream that flows through the node.
+samples of the processed audio stream that flows through the node. Newer Web
+Audio API specs allow this to be changed, so for future compatibility use the
+``AudioSampleFrame``'s ``samplesPerChannel`` to get the value.
 
 This callback will be executed on a dedicated separate audio processing
 thread with real-time processing priority. Each Web Audio context will
@@ -95,7 +97,7 @@ own noise generator AudioWorkletProcessor node type:
 
 .. code-block:: cpp
 
-  void AudioThreadInitialized(EMSCRIPTEN_WEBAUDIO_T audioContext, EM_BOOL success, void *userData)
+  void AudioThreadInitialized(EMSCRIPTEN_WEBAUDIO_T audioContext, bool success, void *userData)
   {
     if (!success) return; // Check browser console in a debug build for detailed errors
     WebAudioWorkletProcessorCreateOptions opts = {
@@ -110,7 +112,7 @@ which resumes the audio context when the user clicks on the DOM Canvas element t
 
 .. code-block:: cpp
 
-  void AudioWorkletProcessorCreated(EMSCRIPTEN_WEBAUDIO_T audioContext, EM_BOOL success, void *userData)
+  void AudioWorkletProcessorCreated(EMSCRIPTEN_WEBAUDIO_T audioContext, bool success, void *userData)
   {
     if (!success) return; // Check browser console in a debug build for detailed errors
 
@@ -126,8 +128,7 @@ which resumes the audio context when the user clicks on the DOM Canvas element t
                                                               "noise-generator", &options, &GenerateNoise, 0);
 
     // Connect it to audio context destination
-    EM_ASM({emscriptenGetAudioObject($0).connect(emscriptenGetAudioObject($1).destination)},
-      wasmAudioWorklet, audioContext);
+    emscripten_audio_node_connect(wasmAudioWorklet, audioContext, 0, 0);
 
     // Resume context on mouse click
     emscripten_set_click_callback("canvas", (void*)audioContext, 0, OnCanvasClick);
@@ -137,13 +138,13 @@ which resumes the audio context when the user clicks on the DOM Canvas element t
 
 .. code-block:: cpp
 
-  EM_BOOL OnCanvasClick(int eventType, const EmscriptenMouseEvent *mouseEvent, void *userData)
+  bool OnCanvasClick(int eventType, const EmscriptenMouseEvent *mouseEvent, void *userData)
   {
     EMSCRIPTEN_WEBAUDIO_T audioContext = (EMSCRIPTEN_WEBAUDIO_T)userData;
     if (emscripten_audio_context_state(audioContext) != AUDIO_CONTEXT_STATE_RUNNING) {
       emscripten_resume_audio_context_sync(audioContext);
     }
-    return EM_FALSE;
+    return false;
   }
 
 5. Finally we can implement the audio callback that is to generate the noise:
@@ -152,16 +153,16 @@ which resumes the audio context when the user clicks on the DOM Canvas element t
 
   #include <emscripten/em_math.h>
 
-  EM_BOOL GenerateNoise(int numInputs, const AudioSampleFrame *inputs,
+  bool GenerateNoise(int numInputs, const AudioSampleFrame *inputs,
                         int numOutputs, AudioSampleFrame *outputs,
                         int numParams, const AudioParamFrame *params,
                         void *userData)
   {
     for(int i = 0; i < numOutputs; ++i)
-      for(int j = 0; j < 128*outputs[i].numberOfChannels; ++j)
+      for(int j = 0; j < outputs[i].samplesPerChannel*outputs[i].numberOfChannels; ++j)
         outputs[i].data[j] = emscripten_random() * 0.2 - 0.1; // Warning: scale down audio volume by factor of 0.2, raw noise can be really loud otherwise
 
-    return EM_TRUE; // Keep the graph output going
+    return true; // Keep the graph output going
   }
 
 And that's it! Compile the code with the linker flags ``-sAUDIO_WORKLET=1 -sWASM_WORKERS=1`` to enable targeting AudioWorklets.
@@ -171,15 +172,15 @@ Synchronizing audio thread with the main thread
 
 Wasm Audio Worklets API builds on top of the Emscripten Wasm Workers feature. This means that the Wasm Audio Worklet thread is modeled as if it was a Wasm Worker thread.
 
-To synchronize information between an Audio Worklet Node and other threads in the application, there are two options:
+To synchronize information between an Audio Worklet Node and other threads in the application, there are three options:
 
 1. Leverage the Web Audio "AudioParams" model. Each Audio Worklet Processor type is instantiated with a custom defined set of audio parameters that can affect the audio computation at sample precise accuracy. These parameters are passed in the ``params`` array into the audio processing function.
 
-The main browser thread that created the Web Audio context can adjust the values of these parameters whenever desired. See `MDN function: setValueAtTime <https://developer.mozilla.org/en-US/docs/Web/API/AudioParam/setValueAtTime>`_ .
+   The main browser thread that created the Web Audio context can adjust the values of these parameters whenever desired. See `MDN function: setValueAtTime <https://developer.mozilla.org/en-US/docs/Web/API/AudioParam/setValueAtTime>`_.
 
 2. Data can be shared with the Audio Worklet thread using GCC/Clang lock-free atomics operations, Emscripten atomics operations and the Wasm Worker API thread synchronization primitives. See :ref:`wasm_workers` for more information.
 
-3. Utilize the ``emscripten_audio_worklet_post_function_*()`` family of event passing functions. These functions operate similar to how the function family emscripten_wasm_worker_post_function_*()`` does. Posting functions enables a ``postMessage()`` style of communication, where the audio worklet thread and the main browser thread can send messages (function call dispatches) to each others.
+3. Utilize the ``emscripten_audio_worklet_post_function_*()`` family of event passing functions. These functions operate similar to the ``emscripten_wasm_worker_post_function_*()`` functions. They enable a ``postMessage()`` style of communication, where the audio worklet thread and the main browser thread can send messages (function call dispatches) to each other.
 
 
 More Examples

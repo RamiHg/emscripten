@@ -2,19 +2,13 @@
 // Emscripten is available under two separate licenses, the MIT license and the
 // University of Illinois/NCSA Open Source License.  Both these licenses can be
 // found in the LICENSE file.
-// This file defines the file object of the new file system.
-// Current Status: Work in Progress.
-// See https://github.com/emscripten-core/emscripten/issues/15041.
+
+// This file defines the file object.
 
 #include "file.h"
 #include "wasmfs.h"
+#include "wasmfs_internal.h"
 #include <emscripten/threading.h>
-
-extern "C" {
-size_t _wasmfs_get_preloaded_file_size(uint32_t index);
-
-void _wasmfs_copy_preloaded_file_data(uint32_t index, uint8_t* data);
-}
 
 namespace wasmfs {
 
@@ -105,7 +99,7 @@ Directory::Handle::insertDataFile(const std::string& name, mode_t mode) {
     return nullptr;
   }
   cacheChild(name, child, DCacheKind::Normal);
-  setMTime(time(NULL));
+  updateMTime();
   return child;
 }
 
@@ -120,7 +114,7 @@ Directory::Handle::insertDirectory(const std::string& name, mode_t mode) {
     return nullptr;
   }
   cacheChild(name, child, DCacheKind::Normal);
-  setMTime(time(NULL));
+  updateMTime();
   return child;
 }
 
@@ -136,7 +130,7 @@ Directory::Handle::insertSymlink(const std::string& name,
     return nullptr;
   }
   cacheChild(name, child, DCacheKind::Normal);
-  setMTime(time(NULL));
+  updateMTime();
   return child;
 }
 
@@ -186,9 +180,8 @@ int Directory::Handle::insertMove(const std::string& name,
   file->locked().setParent(getDir());
 
   // TODO: Moving mount points probably shouldn't update the mtime.
-  auto now = time(NULL);
-  oldParent->locked().setMTime(now);
-  setMTime(now);
+  oldParent->locked().updateMTime();
+  updateMTime();
 
   return 0;
 }
@@ -209,7 +202,7 @@ int Directory::Handle::removeChild(const std::string& name) {
     entry->second.file->locked().setParent(nullptr);
     dcache.erase(entry);
   }
-  setMTime(time(NULL));
+  updateMTime();
   return 0;
 }
 

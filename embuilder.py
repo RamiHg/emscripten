@@ -13,6 +13,7 @@ running multiple build commands in parallel, confusion can occur).
 """
 
 import argparse
+import fnmatch
 import logging
 import sys
 import time
@@ -22,32 +23,38 @@ from tools import cache
 from tools import shared
 from tools import system_libs
 from tools import ports
+from tools import utils
 from tools.settings import settings
-import emscripten
+from tools.system_libs import USE_NINJA
 
 
-# Minimal subset of targets used by CI systems to build enough to useful
+# Minimal subset of targets used by CI systems to build enough to be useful
 MINIMAL_TASKS = [
     'libcompiler_rt',
-    'libcompiler_rt-wasm-sjlj',
+    'libcompiler_rt-legacysjlj',
+    'libcompiler_rt-ww',
     'libc',
     'libc-debug',
+    'libc-ww-debug',
     'libc_optz',
     'libc_optz-debug',
     'libc++abi',
-    'libc++abi-except',
+    'libc++abi-legacyexcept',
     'libc++abi-noexcept',
     'libc++abi-debug',
-    'libc++abi-debug-except',
+    'libc++abi-debug-legacyexcept',
     'libc++abi-debug-noexcept',
+    'libc++abi-debug-ww-noexcept',
     'libc++',
-    'libc++-except',
+    'libc++-legacyexcept',
     'libc++-noexcept',
+    'libc++-ww-noexcept',
     'libal',
     'libdlmalloc',
-    'libdlmalloc-noerrno',
     'libdlmalloc-tracing',
     'libdlmalloc-debug',
+    'libdlmalloc-ww',
+    'libdlmalloc-ww-debug',
     'libembind',
     'libembind-rtti',
     'libemmalloc',
@@ -55,19 +62,29 @@ MINIMAL_TASKS = [
     'libemmalloc-memvalidate',
     'libemmalloc-verbose',
     'libemmalloc-memvalidate-verbose',
+    'libmimalloc',
+    'libmimalloc-mt',
     'libGL',
+    'libGL-getprocaddr',
+    'libGL-emu-getprocaddr',
+    'libGL-emu-webgl2-ofb-getprocaddr',
+    'libGL-webgl2-ofb-getprocaddr',
+    'libGL-ww-getprocaddr',
     'libhtml5',
     'libsockets',
+    'libsockets-ww',
     'libstubs',
     'libstubs-debug',
-    'struct_info',
-    'libstandalonewasm',
+    'libstandalonewasm-nocatch',
     'crt1',
     'crt1_proxy_main',
-    'libunwind-except',
+    'crtbegin',
+    'libunwind-legacyexcept',
     'libnoexit',
     'sqlite3',
     'sqlite3-mt',
+    'libwebgpu',
+    'libwebgpu_cpp',
 ]
 
 # Additional tasks on top of MINIMAL_TASKS that are necessary for PIC testing on
@@ -85,17 +102,24 @@ MINIMAL_PIC_TASKS = MINIMAL_TASKS + [
     'libc++-mt',
     'libc++-mt-noexcept',
     'libdlmalloc-mt',
+    'libdlmalloc-mt-debug',
     'libGL-emu',
-    'libGL-mt',
+    'libGL-emu-webgl2-getprocaddr',
+    'libGL-mt-getprocaddr',
+    'libGL-mt-emu',
+    'libGL-mt-emu-webgl2-getprocaddr',
+    'libGL-mt-emu-webgl2-ofb-getprocaddr',
     'libsockets_proxy',
     'libsockets-mt',
     'crtbegin',
     'libsanitizer_common_rt',
     'libubsan_rt',
-    'libwasm_workers_stub-debug',
-    'libwebgpu_cpp',
+    'libwasm_workers-debug-stub',
     'libfetch',
+    'libfetch-mt',
     'libwasmfs',
+    'libwasmfs-debug',
+    'libwasmfs_no_fs',
     'giflib',
 ]
 
@@ -109,12 +133,13 @@ legacy_prefixes = {
 
 
 def get_help():
-  all_tasks = get_system_tasks()[1] + PORTS
+  all_tasks = get_all_tasks()
   all_tasks.sort()
   return '''
 Available targets:
 
-  build / clear %s
+  build / clear
+        %s
 
 Issuing 'embuilder build ALL' causes each task to be built.
 ''' % '\n        '.join(all_tasks)
@@ -149,12 +174,15 @@ def build_port(port_name):
 def get_system_tasks():
   system_libraries = system_libs.Library.get_all_variations()
   system_tasks = list(system_libraries.keys())
-  # This is needed to build the generated_struct_info.json file.
-  # It is not a system library, but it needs to be built before
-  # running with FROZEN_CACHE.
-  system_tasks += ['struct_info']
-
   return system_libraries, system_tasks
+
+
+def get_all_tasks():
+  return get_system_tasks()[1] + PORTS
+
+
+def handle_port_error(target, message):
+  utils.exit_with_error(f'error building port `{target}` | {message}')
 
 
 def main():
@@ -173,25 +201,29 @@ def main():
                       help='show build commands')
   parser.add_argument('--wasm64', action='store_true',
                       help='use wasm64 architecture')
-  parser.add_argument('operation', help='currently only "build" and "clear" are supported')
-  parser.add_argument('targets', nargs='+', help='see below')
+  parser.add_argument('operation', choices=['build', 'clear', 'rebuild'])
+  parser.add_argument('targets', nargs='*', help='see below')
   args = parser.parse_args()
 
-  if args.operation not in ('build', 'clear'):
-    shared.exit_with_error('unfamiliar operation: ' + args.operation)
+  if args.operation != 'rebuild' and len(args.targets) == 0:
+    shared.exit_with_error('no build targets specified')
+
+  if args.operation == 'rebuild' and not USE_NINJA:
+    shared.exit_with_error('"rebuild" operation is only valid when using Ninja')
 
   # process flags
 
   # Check sanity so that if settings file has changed, the cache is cleared here.
   # Otherwise, the cache will clear in an emcc process, which is invoked while building
   # a system library into the cache, causing trouble.
+  cache.setup()
   shared.check_sanity()
 
   if args.lto:
     settings.LTO = args.lto
 
   if args.verbose:
-    shared.PRINT_STAGES = True
+    shared.PRINT_SUBPROCS = True
 
   if args.pic:
     settings.RELOCATABLE = 1
@@ -205,31 +237,46 @@ def main():
   if args.force:
     do_clear = True
 
+  system_libraries, system_tasks = get_system_tasks()
+
   # process tasks
   auto_tasks = False
-  tasks = args.targets
-  system_libraries, system_tasks = get_system_tasks()
-  if 'SYSTEM' in tasks:
-    tasks = system_tasks
-    auto_tasks = True
-  elif 'USER' in tasks:
-    tasks = PORTS
-    auto_tasks = True
-  elif 'MINIMAL' in tasks:
-    tasks = MINIMAL_TASKS
-    auto_tasks = True
-  elif 'MINIMAL_PIC' in tasks:
-    tasks = MINIMAL_PIC_TASKS
-    auto_tasks = True
-  elif 'ALL' in tasks:
-    tasks = system_tasks + PORTS
-    auto_tasks = True
+  task_targets = dict.fromkeys(args.targets) # use dict to keep targets order
+
+  # substitute
+  predefined_tasks = {
+    'SYSTEM': system_tasks,
+    'USER': PORTS,
+    'MINIMAL': MINIMAL_TASKS,
+    'MINIMAL_PIC': MINIMAL_PIC_TASKS,
+    'ALL': system_tasks + PORTS,
+  }
+  for name, tasks in predefined_tasks.items():
+    if name in task_targets:
+      task_targets[name] = tasks
+      auto_tasks = True
+
+  # flatten tasks
+  tasks = []
+  for name, targets in task_targets.items():
+    if targets is None:
+      # Use target name as task
+      if '*' in name:
+        tasks.extend(fnmatch.filter(get_all_tasks(), name))
+      else:
+        tasks.append(name)
+    else:
+      # There are some ports that we don't want to build as part
+      # of ALL since the are not well tested or widely used:
+      if 'cocos2d' in targets:
+        targets.remove('cocos2d')
+
+      # Use targets from predefined_tasks
+      tasks.extend(targets)
+
   if auto_tasks:
-    # There are some ports that we don't want to build as part
-    # of ALL since the are not well tested or widely used:
-    skip_tasks = ['cocos2d']
-    tasks = [x for x in tasks if x not in skip_tasks]
     print('Building targets: %s' % ' '.join(tasks))
+
   for what in tasks:
     for old, new in legacy_prefixes.items():
       if what.startswith(old):
@@ -244,22 +291,26 @@ def main():
       if do_clear:
         library.erase()
       if do_build:
-        library.build(deterministic_paths=True)
+        if USE_NINJA:
+          library.generate()
+        else:
+          library.build()
     elif what == 'sysroot':
       if do_clear:
         cache.erase_file('sysroot_install.stamp')
       if do_build:
         system_libs.ensure_sysroot()
-    elif what == 'struct_info':
-      if do_clear:
-        emscripten.clear_struct_info()
-      if do_build:
-        emscripten.generate_struct_info()
     elif what in PORTS:
       if do_clear:
         clear_port(what)
       if do_build:
         build_port(what)
+    elif ':' in what or what.endswith('.py'):
+      name = ports.handle_use_port_arg(settings, what, lambda message: handle_port_error(what, message))
+      if do_clear:
+        clear_port(name)
+      if do_build:
+        build_port(name)
     else:
       logger.error('unfamiliar build target: ' + what)
       return 1
@@ -267,7 +318,10 @@ def main():
     time_taken = time.time() - start_time
     logger.info('...success. Took %s(%.2fs)' % (('%02d:%02d mins ' % (time_taken // 60, time_taken % 60) if time_taken >= 60 else ''), time_taken))
 
-  if len(tasks) > 1:
+  if USE_NINJA and args.operation != 'clear':
+    system_libs.build_deferred()
+
+  if len(tasks) > 1 or USE_NINJA:
     all_build_time_taken = time.time() - all_build_start_time
     logger.info('Built %d targets in %s(%.2fs)' % (len(tasks), ('%02d:%02d mins ' % (all_build_time_taken // 60, all_build_time_taken % 60) if all_build_time_taken >= 60 else ''), all_build_time_taken))
 

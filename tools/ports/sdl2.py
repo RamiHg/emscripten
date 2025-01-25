@@ -5,11 +5,11 @@
 
 import os
 
-TAG = 'release-2.24.2'
-HASH = 'b178bdc8f7c40271e09a72f639649d1d61953dda4dc12b77437259667b63b961fd3b2c67b0de6fdc5f9f9c80c49bfafd164e4c13715bc1056e550acc8bad5a3c'
+TAG = 'release-2.30.9'
+HASH = '00079415bd3aab9ab2cf67c466ca0ab96076ff8b9c8ed6d4e11db15e10f5cf91f49da6356cf3ed9adc91e185c1aada3886baa80d14d421729805adaa98563e36'
 SUBDIR = 'SDL-' + TAG
 
-variants = {'sdl2-mt': {'USE_PTHREADS': 1}}
+variants = {'sdl2-mt': {'PTHREADS': 1}}
 
 
 def needed(settings):
@@ -17,7 +17,7 @@ def needed(settings):
 
 
 def get_lib_name(settings):
-  return 'libSDL2' + ('-mt' if settings.USE_PTHREADS else '') + '.a'
+  return 'libSDL2' + ('-mt' if settings.PTHREADS else '') + '.a'
 
 
 def get(ports, settings, shared):
@@ -26,7 +26,7 @@ def get(ports, settings, shared):
 
   def create(final):
     # copy includes to a location so they can be used as 'SDL2/'
-    src_dir = os.path.join(ports.get_dir(), 'sdl2', SUBDIR)
+    src_dir = ports.get_dir('sdl2', SUBDIR)
     source_include_path = os.path.join(src_dir, 'include')
     ports.install_headers(source_include_path, target='SDL2')
 
@@ -35,9 +35,11 @@ def get(ports, settings, shared):
     SDL_utils.c atomic/SDL_atomic.c atomic/SDL_spinlock.c audio/SDL_audio.c audio/SDL_audiocvt.c
     audio/SDL_audiodev.c audio/SDL_audiotypecvt.c audio/SDL_mixer.c audio/SDL_wave.c cpuinfo/SDL_cpuinfo.c
     dynapi/SDL_dynapi.c events/SDL_clipboardevents.c events/SDL_displayevents.c events/SDL_dropevents.c
-    events/SDL_events.c events/SDL_gesture.c events/SDL_keyboard.c events/SDL_mouse.c events/SDL_quit.c
+    events/SDL_events.c events/SDL_gesture.c events/SDL_keyboard.c events/SDL_keysym_to_scancode.c
+    events/SDL_scancode_tables.c events/SDL_mouse.c events/SDL_quit.c
     events/SDL_touch.c events/SDL_windowevents.c file/SDL_rwops.c haptic/SDL_haptic.c
     joystick/controller_type.c joystick/SDL_gamecontroller.c joystick/SDL_joystick.c
+    joystick/SDL_steam_virtual_gamepad.c
     power/SDL_power.c render/SDL_d3dmath.c render/SDL_render.c
     render/SDL_yuv_sw.c render/direct3d/SDL_render_d3d.c render/direct3d11/SDL_render_d3d11.c
     render/opengl/SDL_render_gl.c render/opengl/SDL_shaders_gl.c render/opengles/SDL_render_gles.c
@@ -57,21 +59,21 @@ def get(ports, settings, shared):
     video/emscripten/SDL_emscriptenframebuffer.c video/emscripten/SDL_emscriptenmouse.c
     video/emscripten/SDL_emscriptenopengles.c video/emscripten/SDL_emscriptenvideo.c
     audio/emscripten/SDL_emscriptenaudio.c video/dummy/SDL_nullevents.c
-    video/dummy/SDL_nullframebuffer.c video/dummy/SDL_nullvideo.c video/yuv2rgb/yuv_rgb.c
+    video/dummy/SDL_nullframebuffer.c video/dummy/SDL_nullvideo.c video/yuv2rgb/yuv_rgb_std.c
     audio/disk/SDL_diskaudio.c audio/dummy/SDL_dummyaudio.c loadso/dlopen/SDL_sysloadso.c
     power/emscripten/SDL_syspower.c joystick/emscripten/SDL_sysjoystick.c
     filesystem/emscripten/SDL_sysfilesystem.c timer/unix/SDL_systimer.c haptic/dummy/SDL_syshaptic.c
     main/dummy/SDL_dummy_main.c locale/SDL_locale.c locale/emscripten/SDL_syslocale.c misc/SDL_url.c
     misc/emscripten/SDL_sysurl.c'''.split()
     thread_srcs = ['SDL_syscond.c', 'SDL_sysmutex.c', 'SDL_syssem.c', 'SDL_systhread.c', 'SDL_systls.c']
-    thread_backend = 'generic' if not settings.USE_PTHREADS else 'pthread'
+    thread_backend = 'generic' if not settings.PTHREADS else 'pthread'
     srcs += ['thread/%s/%s' % (thread_backend, s) for s in thread_srcs]
 
     srcs = [os.path.join(src_dir, 'src', s) for s in srcs]
     flags = ['-sUSE_SDL=0']
     includes = [ports.get_include_dir('SDL2')]
-    if settings.USE_PTHREADS:
-      flags += ['-sUSE_PTHREADS']
+    if settings.PTHREADS:
+      flags += ['-pthread']
     ports.build_port(src_dir, final, 'sdl2', srcs=srcs, includes=includes, flags=flags)
 
   return [shared.cache.get_lib(get_lib_name(settings), create, what='port')]
@@ -81,14 +83,9 @@ def clear(ports, settings, shared):
   shared.cache.erase_lib(get_lib_name(settings))
 
 
-def linker_setup(ports, settings):
-  # TODO(sbc): Move these into native code use EM_JS_DEPS macro.
-  settings.DEFAULT_LIBRARY_FUNCS_TO_INCLUDE += ['$autoResumeAudioContext', '$dynCall']
-
-
 def process_args(ports):
-  return ['-I' + ports.get_include_dir('SDL2')]
+  return ['-isystem', ports.get_include_dir('SDL2')]
 
 
 def show():
-  return 'SDL2 (USE_SDL=2; zlib license)'
+  return 'sdl2 (-sUSE_SDL=2 or --use-port=sdl2; zlib license)'

@@ -6,25 +6,39 @@
 
 // === Auto-generated postamble setup entry stuff ===
 
+#if HEADLESS
+if (!ENVIRONMENT_IS_WEB) {
+#include "headlessCanvas.js"
+#include "headless.js"
+}
+#endif
+
+#if PROXY_TO_WORKER
+if (ENVIRONMENT_IS_WORKER) {
+#include "webGLWorker.js'
+#include "proxyWorker.js"
+}
+#endif
+
+#if DETERMINISTIC
+#include "deterministic.js"
+#endif
+
 {{{ exportRuntime() }}}
 
+#if ASSERTIONS
 var calledRun;
+#endif
 
 #if STANDALONE_WASM && MAIN_READS_PARAMS
 var mainArgs = undefined;
 #endif
 
-dependenciesFulfilled = function runCaller() {
-  // If run has never been called, and we should call run (INVOKE_RUN is true, and Module.noInitialRun is not false)
-  if (!calledRun) run();
-  if (!calledRun) dependenciesFulfilled = runCaller; // try this again later, after new deps are fulfilled
-};
-
 #if HAS_MAIN
 #if MAIN_READS_PARAMS
-function callMain(args = []) {
+{{{ asyncIf(ASYNCIFY == 2) }}}function callMain(args = []) {
 #else
-function callMain() {
+{{{ asyncIf(ASYNCIFY == 2) }}}function callMain() {
 #endif
 #if ASSERTIONS
   assert(runDependencies == 0, 'cannot call main when async dependencies remain! (listen on Module["onRuntimeInitialized"])');
@@ -32,6 +46,12 @@ function callMain() {
 #endif
 
   var entryFunction = {{{ getEntryFunction() }}};
+
+#if PROXY_TO_PTHREAD
+  // With PROXY_TO_PTHREAD make sure we keep the runtime alive until the
+  // proxied main calls exit (see exitOnMainThread() for where Pop is called).
+  {{{ runtimeKeepalivePush() }}}
+#endif
 
 #if MAIN_MODULE
   // Main modules can't tell if they have main() at compile time, since it may
@@ -45,27 +65,22 @@ function callMain() {
   args.unshift(thisProgram);
 
   var argc = args.length;
-  var argv = stackAlloc((argc + 1) * {{{ Runtime.POINTER_SIZE }}});
-  var argv_ptr = argv >> {{{ POINTER_SHIFT }}};
+  var argv = stackAlloc((argc + 1) * {{{ POINTER_SIZE }}});
+  var argv_ptr = argv;
   args.forEach((arg) => {
-    {{{ POINTER_HEAP }}}[argv_ptr++] = {{{ to64('allocateUTF8OnStack(arg)') }}};
+    {{{ makeSetValue('argv_ptr', 0, 'stringToUTF8OnStack(arg)', '*') }}};
+    argv_ptr += {{{ POINTER_SIZE }}};
   });
-  {{{ POINTER_HEAP }}}[argv_ptr] = {{{ to64('0') }}};
+  {{{ makeSetValue('argv_ptr', 0, 0, '*') }}};
 #else
   var argc = 0;
   var argv = 0;
 #endif // MAIN_READS_PARAMS
 
-#if ABORT_ON_WASM_EXCEPTIONS || !PROXY_TO_PTHREAD
   try {
-#endif
-#if BENCHMARK
-    var start = Date.now();
-#endif
-
 #if ABORT_ON_WASM_EXCEPTIONS
     // See abortWrapperDepth in preamble.js!
-    abortWrapperDepth += 1;
+    abortWrapperDepth++;
 #endif
 
 #if STANDALONE_WASM
@@ -77,43 +92,22 @@ function callMain() {
     var ret = entryFunction(argc, {{{ to64('argv') }}});
 #endif // STANDALONE_WASM
 
-#if BENCHMARK
-    Module.realPrint('main() took ' + (Date.now() - start) + ' milliseconds');
-#endif
-
-    // In PROXY_TO_PTHREAD builds, we should never exit the runtime below, as
-    // execution is asynchronously handed off to a pthread.
-#if PROXY_TO_PTHREAD
-#if ASSERTIONS
-    assert(ret == 0, '_emscripten_proxy_main failed to start proxy thread: ' + ret);
-#endif
-#if ABORT_ON_WASM_EXCEPTIONS
-  }
-#endif
-#else
-#if ASYNCIFY == 2
+#if ASYNCIFY == 2 && !PROXY_TO_PTHREAD
     // The current spec of JSPI returns a promise only if the function suspends
     // and a plain value otherwise. This will likely change:
     // https://github.com/WebAssembly/js-promise-integration/issues/11
-    Promise.resolve(ret).then((result) => {
-      exitJS(result, /* implicit = */ true);
-    }).catch((e) => {
-      handleException(e);
-    });
-#else
+    ret = await ret;
+#endif // ASYNCIFY == 2
     // if we're not running an evented main loop, it's time to exit
     exitJS(ret, /* implicit = */ true);
-#endif // ASYNCIFY == 2
     return ret;
-  }
-  catch (e) {
+  } catch (e) {
     return handleException(e);
   }
-#endif // !PROXY_TO_PTHREAD
 #if ABORT_ON_WASM_EXCEPTIONS
   finally {
     // See abortWrapperDepth in preamble.js!
-    abortWrapperDepth -= 1;
+    abortWrapperDepth--;
   }
 #endif
 }
@@ -124,8 +118,8 @@ function stackCheckInit() {
   // This is normally called automatically during __wasm_call_ctors but need to
   // get these values before even running any of the ctors so we call it redundantly
   // here.
-#if ASSERTIONS && USE_PTHREADS
-  // See $establishStackSpace for the equivelent code that runs on a thread
+#if ASSERTIONS && PTHREADS
+  // See $establishStackSpace for the equivalent code that runs on a thread
   assert(!ENVIRONMENT_IS_PTHREAD);
 #endif
 #if RELOCATABLE
@@ -138,14 +132,12 @@ function stackCheckInit() {
 }
 #endif
 
-#if RELOCATABLE
-var dylibsLoaded = false;
-#if '$LDSO' in addedLibraryItems
-LDSO.init();
-#endif
+#if MAIN_MODULE && PTHREADS
+// Map of modules to be shared with new threads.  This gets populated by the
+// main thread and shared with all new workers via the initial `load` message.
+var sharedModules = {};
 #endif
 
-/** @type {function(Array=)} */
 #if MAIN_READS_PARAMS
 function run(args = arguments_) {
 #else
@@ -153,78 +145,45 @@ function run() {
 #endif
 
   if (runDependencies > 0) {
-#if RUNTIME_LOGGING
-    err('run() called, but dependencies remain, so not running');
+#if RUNTIME_DEBUG
+    dbg('run() called, but dependencies remain, so not running');
 #endif
+    dependenciesFulfilled = run;
     return;
   }
+
+#if PTHREADS || WASM_WORKERS
+  if ({{{ ENVIRONMENT_IS_WORKER_THREAD() }}}) {
+#if MODULARIZE
+    readyPromiseResolve(Module);
+#endif
+    initRuntime();
+    return;
+  }
+#endif
 
 #if STACK_OVERFLOW_CHECK
-#if USE_PTHREADS
-  if (!ENVIRONMENT_IS_PTHREAD)
-#endif
-    stackCheckInit();
-#endif
-
-#if RELOCATABLE
-  if (!dylibsLoaded) {
-  // Loading of dynamic libraries needs to happen on each thread, so we can't
-  // use the normal __ATPRERUN__ mechanism.
-#if MAIN_MODULE
-    preloadDylibs();
-#else
-    reportUndefinedSymbols();
-#endif
-    dylibsLoaded = true;
-
-    // Loading dylibs can add run dependencies.
-    if (runDependencies > 0) {
-#if RUNTIME_LOGGING
-      err('preloadDylibs added run() dependencies, not running yet');
-#endif
-      return;
-    }
-  }
-#endif
-
-#if WASM_WORKERS
-  if (ENVIRONMENT_IS_WASM_WORKER) {
-#if MODULARIZE
-    readyPromiseResolve(Module);
-#endif // MODULARIZE
-    return initRuntime();
-  }
-#endif
-
-#if USE_PTHREADS
-  if (ENVIRONMENT_IS_PTHREAD) {
-#if MODULARIZE
-    // The promise resolve function typically gets called as part of the execution
-    // of `doRun` below. The workers/pthreads don't execute `doRun` so the
-    // creation promise can be resolved, marking the pthread-Module as initialized.
-    readyPromiseResolve(Module);
-#endif // MODULARIZE
-    initRuntime();
-    startWorker(Module);
-    return;
-  }
+  stackCheckInit();
 #endif
 
   preRun();
 
   // a preRun added a dependency, run will be called later
   if (runDependencies > 0) {
-#if RUNTIME_LOGGING
-    err('run() called, but dependencies remain, so not running');
+#if RUNTIME_DEBUG
+    dbg('run() called, but dependencies remain, so not running');
 #endif
+    dependenciesFulfilled = run;
     return;
   }
 
   function doRun() {
     // run may have just been called through dependencies being fulfilled just in this very frame,
     // or while the async setStatus time below was happening
-    if (calledRun) return;
+#if ASSERTIONS
+    assert(!calledRun);
     calledRun = true;
+#endif
     Module['calledRun'] = true;
 
     if (ABORT) return;
@@ -239,14 +198,15 @@ function run() {
     readyPromiseResolve(Module);
 #endif
 #if expectToReceiveOnModule('onRuntimeInitialized')
-    if (Module['onRuntimeInitialized']) Module['onRuntimeInitialized']();
+    Module['onRuntimeInitialized']?.();
 #endif
 
 #if HAS_MAIN
+    {{{ makeModuleReceiveWithVar('noInitialRun', undefined, !INVOKE_RUN) }}}
 #if MAIN_READS_PARAMS
-    if (shouldRunNow) callMain(args);
+    if (!noInitialRun) callMain(args);
 #else
-    if (shouldRunNow) callMain();
+    if (!noInitialRun) callMain();
 #endif
 #else
 #if ASSERTIONS
@@ -260,10 +220,8 @@ function run() {
 #if expectToReceiveOnModule('setStatus')
   if (Module['setStatus']) {
     Module['setStatus']('Running...');
-    setTimeout(function() {
-      setTimeout(function() {
-        Module['setStatus']('');
-      }, 1);
+    setTimeout(() => {
+      setTimeout(() => Module['setStatus'](''), 1);
       doRun();
     }, 1);
   } else
@@ -299,18 +257,22 @@ function checkUnflushedContent() {
   try { // it doesn't matter if it fails
 #if SYSCALLS_REQUIRE_FILESYSTEM == 0 && '$flush_NO_FILESYSTEM' in addedLibraryItems
     flush_NO_FILESYSTEM();
+#elif WASMFS && hasExportedSymbol('wasmfs_flush')
+    // In WasmFS we must also flush the WasmFS internal buffers, for this check
+    // to work.
+    _wasmfs_flush();
 #elif hasExportedSymbol('fflush')
     _fflush(0);
 #endif
 #if '$FS' in addedLibraryItems && '$TTY' in addedLibraryItems
     // also flush in the JS FS layer
-    ['stdout', 'stderr'].forEach(function(name) {
+    ['stdout', 'stderr'].forEach((name) => {
       var info = FS.analyzePath('/dev/' + name);
       if (!info) return;
       var stream = info.object;
       var rdev = stream.rdev;
       var tty = TTY.ttys[rdev];
-      if (tty && tty.output && tty.output.length) {
+      if (tty?.output?.length) {
         has = true;
       }
     });
@@ -319,7 +281,7 @@ function checkUnflushedContent() {
   out = oldOut;
   err = oldErr;
   if (has) {
-    warnOnce('stdio streams had content in them that was not flushed. you should set EXIT_RUNTIME to 1 (see the FAQ), or make sure to emit a newline when you printf etc.');
+    warnOnce('stdio streams had content in them that was not flushed. you should set EXIT_RUNTIME to 1 (see the Emscripten FAQ), or make sure to emit a newline when you printf etc.');
 #if FILESYSTEM == 0 || SYSCALLS_REQUIRE_FILESYSTEM == 0
     warnOnce('(this may also be due to not including full filesystem support - try building with -sFORCE_FILESYSTEM)');
 #endif
@@ -337,27 +299,13 @@ if (Module['preInit']) {
 }
 #endif
 
-#if HAS_MAIN
-// shouldRunNow refers to calling main(), not run().
-#if INVOKE_RUN
-var shouldRunNow = true;
-#else
-var shouldRunNow = false;
-#endif
-
-#if expectToReceiveOnModule('noInitialRun')
-if (Module['noInitialRun']) shouldRunNow = false;
-#endif
-
-#endif // HAS_MAIN
-
 run();
 
 #if BUILD_AS_WORKER
 
 var workerResponded = false, workerCallbackId = -1;
 
-(function() {
+(() => {
   var messageBuffer = null, buffer = 0, bufferSize = 0;
 
   function flushMessages() {
@@ -365,9 +313,7 @@ var workerResponded = false, workerCallbackId = -1;
     if (runtimeInitialized) {
       var temp = messageBuffer;
       messageBuffer = null;
-      temp.forEach(function(message) {
-        onmessage(message);
-      });
+      temp.forEach((message) => onmessage(message));
     }
   }
 

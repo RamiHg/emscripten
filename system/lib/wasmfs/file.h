@@ -3,14 +3,13 @@
 // University of Illinois/NCSA Open Source License.  Both these licenses can be
 // found in the LICENSE file.
 
-// This file defines the file object of the new file system.
-// Current Status: Work in Progress.
-// See https://github.com/emscripten-core/emscripten/issues/15041.
+// This file defines the file object.
 
 #pragma once
 
 #include "support.h"
 #include <assert.h>
+#include <emscripten.h>
 #include <emscripten/html5.h>
 #include <map>
 #include <mutex>
@@ -96,21 +95,21 @@ public:
 protected:
   File(FileKind kind, mode_t mode, backend_t backend)
     : kind(kind), mode(mode), backend(backend) {
-    atime = mtime = ctime = time(NULL);
+    atime = mtime = ctime = emscripten_date_now();
   }
 
   // A mutex is needed for multiple accesses to the same file.
   std::recursive_mutex mutex;
 
-  // The the size in bytes of a file or return a negative error code. May be
+  // The size in bytes of a file or return a negative error code. May be
   // called on files that have not been opened.
   virtual off_t getSize() = 0;
 
   mode_t mode = 0; // User and group mode bits for access permission.
 
-  time_t atime = 0; // Time when the content was last accessed.
-  time_t mtime = 0; // Time when the file content was last modified.
-  time_t ctime = 0; // Time when the file node was last modified.
+  double atime; // Time when the content was last accessed, in ms.
+  double mtime; // Time when the file content was last modified, in ms.
+  double ctime; // Time when the file node was last modified, in ms.
 
   // Reference to parent of current file node. This can be used to
   // traverse up the directory tree. A weak_ptr ensures that the ref
@@ -314,12 +313,30 @@ public:
     // directory, for example).
     file->mode = (file->mode & S_IFMT) | (mode & ~S_IFMT);
   }
-  time_t getCTime() { return file->ctime; }
-  void setCTime(time_t time) { file->ctime = time; }
-  time_t getMTime() { return file->mtime; }
-  void setMTime(time_t time) { file->mtime = time; }
-  time_t getATime() { return file->atime; }
-  void setATime(time_t time) { file->atime = time; }
+  double getCTime() {
+    return file->ctime;
+  }
+  void setCTime(double time) { file->ctime = time; }
+  // updateCTime() updates the ctime to the current time.
+  void updateCTime() {
+    file->ctime = emscripten_date_now();
+  }
+  double getMTime() {
+    return file->mtime;
+  }
+  void setMTime(double time) { file->mtime = time; }
+  // updateMTime() updates the mtime to the current time.
+  void updateMTime() {
+    file->mtime = emscripten_date_now();
+  }
+  double getATime() {
+    return file->atime;
+  }
+  void setATime(double time) { file->atime = time; }
+  // updateATime() updates the atime to the current time.
+  void updateATime() {
+    file->atime = emscripten_date_now();
+  }
 
   // Note: parent.lock() creates a new shared_ptr to the same Directory
   // specified by the parent weak_ptr.

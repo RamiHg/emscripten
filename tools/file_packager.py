@@ -35,6 +35,8 @@ Usage:
 
   --obj-output=FILE create an object file from embedded files, for direct linking into a wasm binary.
 
+  --depfile=FILE Writes a dependency list containing the list of directories and files walked, compatible with Make, Ninja, CMake, etc.
+
   --wasm64 When used with `--obj-output` create a wasm64 object file
 
   --export-name=EXPORT_NAME Use custom export name (default is `Module`)
@@ -54,6 +56,8 @@ Usage:
                         and audio using the browser's codecs.
 
   --no-node Whether to support Node.js. By default we do, which emits some extra code.
+
+  --quiet Suppress reminder about using `FORCE_FILESYSTEM`
 
 Notes:
 
@@ -77,7 +81,7 @@ from typing import List
 
 __scriptdir__ = os.path.dirname(os.path.abspath(__file__))
 __rootdir__ = os.path.dirname(__scriptdir__)
-sys.path.append(__rootdir__)
+sys.path.insert(0, __rootdir__)
 
 from tools import shared, utils, js_manipulation
 
@@ -96,6 +100,7 @@ AV_WORKAROUND = 0
 
 excluded_patterns: List[str] = []
 new_data_files = []
+walked = []
 
 
 class Options:
@@ -105,7 +110,9 @@ class Options:
     self.has_embedded = False
     self.jsoutput = None
     self.obj_output = None
+    self.depfile = None
     self.from_emcc = False
+    self.quiet = False
     self.force = True
     # If set to True, IndexedDB (IDBFS in library_idbfs.js) is used to locally
     # cache VFS XHR so that subsequent page loads can read the data from the
@@ -138,10 +145,6 @@ def err(*args):
   print(*args, file=sys.stderr)
 
 
-def to_unix_path(p):
-  return p.replace(os.path.sep, '/')
-
-
 def base64_encode(b):
   b64 = base64.b64encode(b)
   return b64.decode('ascii')
@@ -169,10 +172,7 @@ def should_ignore(fullname):
   if has_hidden_attribute(fullname):
     return True
 
-  for p in excluded_patterns:
-    if fnmatch.fnmatch(fullname, p):
-      return True
-  return False
+  return any(fnmatch.fnmatch(fullname, p) for p in excluded_patterns)
 
 
 def add(mode, rootpathsrc, rootpathdst):
@@ -183,11 +183,13 @@ def add(mode, rootpathsrc, rootpathdst):
   rootpathdst: The name we want to make the source path available on the
                emscripten virtual FS.
   """
+  walked.append(rootpathsrc)
   for dirpath, dirnames, filenames in os.walk(rootpathsrc):
     new_dirnames = []
     for name in dirnames:
       fullname = os.path.join(dirpath, name)
       if not should_ignore(fullname):
+        walked.append(fullname)
         new_dirnames.append(name)
       elif DEBUG:
         err('Skipping directory "%s" from inclusion in the emscripten '
@@ -195,6 +197,7 @@ def add(mode, rootpathsrc, rootpathdst):
     for name in filenames:
       fullname = os.path.join(dirpath, name)
       if not should_ignore(fullname):
+        walked.append(fullname)
         # Convert source filename relative to root directory of target FS.
         dstpath = os.path.join(rootpathdst,
                                os.path.relpath(fullname, rootpathsrc))
@@ -274,7 +277,7 @@ def generate_object_file(data_files):
 
       size = os.path.getsize(f.srcpath)
       dstpath = to_asm_string(f.dstpath)
-      srcpath = to_unix_path(f.srcpath)
+      srcpath = utils.normalize_path(f.srcpath)
       out.write(dedent(f'''
       .section .rodata.{f.c_symbol_name},"",@
 
@@ -341,20 +344,27 @@ def generate_object_file(data_files):
       .dc.a 0
       .size __emscripten_embedded_file_data, {total_size}
       '''))
+  cmd = [shared.EMCC, '-c', asm_file, '-o', options.obj_output]
   if options.wasm64:
     target = 'wasm64-unknown-emscripten'
+    cmd.append('-Wno-experimental')
   else:
     target = 'wasm32-unknown-emscripten'
-  shared.check_call([shared.EMCC,
-                     '-c',
-                     '--target=' + target,
-                     '-o', options.obj_output,
-                     asm_file])
+  cmd.append('--target=' + target)
+  shared.check_call(cmd)
 
 
-def main():
+def main():  # noqa: C901, PLR0912, PLR0915
+  """Future modifications should consider refactoring to reduce complexity.
+
+  * The McCabe cyclomatiic complexity is currently 60 vs 10 recommended.
+  * There are currently 63 branches vs 12 recommended.
+  * There are currently 151 statements vs 50 recommended.
+
+  To revalidate these numbers, run `ruff check --select=C901,PLR091`.
+  """
   if len(sys.argv) == 1:
-    err('''Usage: file_packager TARGET [--preload A [B..]] [--embed C [D..]] [--exclude E [F..]]] [--js-output=OUTPUT.js] [--no-force] [--use-preload-cache] [--indexedDB-name=EM_PRELOAD_CACHE] [--separate-metadata] [--lz4] [--use-preload-plugins]
+    err('''Usage: file_packager TARGET [--preload A [B..]] [--embed C [D..]] [--exclude E [F..]]] [--js-output=OUTPUT.js] [--no-force] [--use-preload-cache] [--indexedDB-name=EM_PRELOAD_CACHE] [--separate-metadata] [--lz4] [--use-preload-plugins] [--no-node]
   See the source for more details.''')
     return 1
 
@@ -400,21 +410,25 @@ def main():
     elif arg.startswith('--obj-output'):
       options.obj_output = arg.split('=', 1)[1] if '=' in arg else None
       leading = ''
+    elif arg.startswith('--depfile'):
+      options.depfile = arg.split('=', 1)[1] if '=' in arg else None
+      leading = ''
     elif arg == '--wasm64':
       options.wasm64 = True
     elif arg.startswith('--export-name'):
       if '=' in arg:
         options.export_name = arg.split('=', 1)[1]
       leading = ''
-    elif arg.startswith('--from-emcc'):
+    elif arg == '--from-emcc':
       options.from_emcc = True
       leading = ''
+    elif arg == '--quiet':
+      options.quiet = True
     elif arg.startswith('--plugin'):
-      with open(arg.split('=', 1)[1]) as f:
-        plugin = f.read()
+      plugin = utils.read_file(arg.split('=', 1)[1])
       eval(plugin) # should append itself to plugins
       leading = ''
-    elif leading == 'preload' or leading == 'embed':
+    elif leading in {'preload', 'embed'}:
       mode = leading
       # position of @ if we're doing 'src@dst'. '__' is used to keep the index
       # same with the original if they escaped with '@@'.
@@ -450,7 +464,7 @@ def main():
           'and a specified --js-output')
       return 1
 
-  if not options.from_emcc:
+  if not options.from_emcc and not options.quiet:
     err('Remember to build the main file with `-sFORCE_FILESYSTEM` '
         'so that it includes support for loading this file package')
 
@@ -458,11 +472,13 @@ def main():
     err('error: TARGET should not be the same value of --js-output')
     return 1
 
+  walked.append(__file__)
   for file_ in data_files:
     if not should_ignore(file_.srcpath):
       if os.path.isdir(file_.srcpath):
         add(file_.mode, file_.srcpath, file_.dstpath)
       else:
+        walked.append(file_.srcpath)
         new_data_files.append(file_)
   data_files = [file_ for file_ in new_data_files
                 if not os.path.isdir(file_.srcpath)]
@@ -490,7 +506,7 @@ def main():
         err('Error: Embedding "%s" which is not contained within the current directory '
             '"%s".  This is invalid since the current directory becomes the '
             'root that the generated code will see.  To include files outside of the current '
-            'working directoty you can use the `--preload-file srcpath@dstpath` syntax to '
+            'working directory you can use the `--preload-file srcpath@dstpath` syntax to '
             'explicitly specify the target location.' % (path, curr_abspath))
         sys.exit(1)
       file_.dstpath = abspath[len(curr_abspath) + 1:]
@@ -503,7 +519,7 @@ def main():
 
   for file_ in data_files:
     # name in the filesystem, native and emulated
-    file_.dstpath = to_unix_path(file_.dstpath)
+    file_.dstpath = utils.normalize_path(file_.dstpath)
     # If user has submitted a directory name as the destination but omitted
     # the destination filename, use the filename from source file
     if file_.dstpath.endswith('/'):
@@ -556,19 +572,34 @@ def main():
       # differs from the current generated one, otherwise leave the file
       # untouched preserving its old timestamp
       if os.path.isfile(options.jsoutput):
-        with open(options.jsoutput) as f:
-          old = f.read()
+        old = utils.read_file(options.jsoutput)
         if old != ret:
-          with open(options.jsoutput, 'w') as f:
-            f.write(ret)
+          utils.write_file(options.jsoutput, ret)
       else:
-        with open(options.jsoutput, 'w') as f:
-          f.write(ret)
+        utils.write_file(options.jsoutput, ret)
       if options.separate_metadata:
-        with open(options.jsoutput + '.metadata', 'w') as f:
-          json.dump(metadata, f, separators=(',', ':'))
+        utils.write_file(options.jsoutput + '.metadata', json.dumps(metadata, separators=(',', ':')))
+
+  if options.depfile:
+    with open(options.depfile, 'w') as f:
+      for target in (data_target, options.jsoutput):
+        if target:
+          f.write(escape_for_makefile(target))
+          f.write(' \\\n')
+      f.write(': \\\n')
+      for dependency in walked:
+        f.write(escape_for_makefile(dependency))
+        f.write(' \\\n')
 
   return 0
+
+
+def escape_for_makefile(fpath):
+  # Escapes for CMake's "pathname" grammar as described here:
+  #   https://cmake.org/cmake/help/latest/command/add_custom_command.html#grammar-token-depfile-pathname
+  # Which is congruent with how Ninja and GNU Make expect characters escaped.
+  fpath = utils.normalize_path(fpath)
+  return fpath.replace('$', '$$').replace('#', '\\#').replace(' ', '\\ ')
 
 
 def generate_js(data_target, data_files, metadata):
@@ -578,18 +609,20 @@ def generate_js(data_target, data_files, metadata):
     ret = ''
   else:
     ret = '''
-  var Module = typeof %(EXPORT_NAME)s !== 'undefined' ? %(EXPORT_NAME)s : {};\n''' % {"EXPORT_NAME": options.export_name}
+  var Module = typeof %(EXPORT_NAME)s != 'undefined' ? %(EXPORT_NAME)s : {};\n''' % {"EXPORT_NAME": options.export_name}
 
   ret += '''
-  if (!Module.expectedDataFileDownloads) {
-    Module.expectedDataFileDownloads = 0;
-  }
-
-  Module.expectedDataFileDownloads++;
-  (function() {
+  Module['expectedDataFileDownloads'] ??= 0;
+  Module['expectedDataFileDownloads']++;
+  (() => {
     // Do not attempt to redownload the virtual filesystem data when in a pthread or a Wasm Worker context.
-    if (Module['ENVIRONMENT_IS_PTHREAD'] || Module['$ww']) return;
-    var loadPackage = function(metadata) {\n'''
+    var isPthread = typeof ENVIRONMENT_IS_PTHREAD != 'undefined' && ENVIRONMENT_IS_PTHREAD;
+    var isWasmWorker = typeof ENVIRONMENT_IS_WASM_WORKER != 'undefined' && ENVIRONMENT_IS_WASM_WORKER;
+    if (isPthread || isWasmWorker) return;\n'''
+
+  if options.support_node:
+    ret += "    var isNode = typeof process === 'object' && typeof process.versions === 'object' && typeof process.versions.node === 'string';\n"
+  ret += '    function loadPackage(metadata) {\n'
 
   code = '''
       function assert(check, msg) {
@@ -617,8 +650,7 @@ def generate_js(data_target, data_files, metadata):
     with open(data_target, 'wb') as data:
       for file_ in data_files:
         file_.data_start = start
-        with open(file_.srcpath, 'rb') as f:
-          curr = f.read()
+        curr = utils.read_binary(file_.srcpath)
         file_.data_end = start + len(curr)
         if AV_WORKAROUND:
             curr += '\x00'
@@ -632,18 +664,13 @@ def generate_js(data_target, data_files, metadata):
           % (start / (1024 * 1024)))
 
     create_preloaded = '''
-          Module['FS_createPreloadedFile'](this.name, null, byteArray, true, true, function() {
-            Module['removeRunDependency']('fp ' + that.name);
-          }, function() {
-            if (that.audio) {
-              Module['removeRunDependency']('fp ' + that.name); // workaround for chromium bug 124926 (still no audio with this, but at least we don't hang)
-            } else {
-              err('Preloading file ' + that.name + ' failed');
-            }
-          }, false, true); // canOwn this data in the filesystem, it is a slide into the heap that will never change\n'''
+          Module['FS_createPreloadedFile'](this.name, null, byteArray, true, true,
+            () => Module['removeRunDependency'](`fp ${that.name}`),
+            () => err(`Preloading file ${that.name} failed`),
+            false, true); // canOwn this data in the filesystem, it is a slide into the heap that will never change\n'''
     create_data = '''// canOwn this data in the filesystem, it is a slide into the heap that will never change
           Module['FS_createDataFile'](this.name, null, byteArray, true, true, true);
-          Module['removeRunDependency']('fp ' + that.name);'''
+          Module['removeRunDependency'](`fp ${that.name}`);'''
 
     if not options.lz4:
       # Data requests - for getting a block of data out of the big archive - have
@@ -660,7 +687,7 @@ def generate_js(data_target, data_files, metadata):
         open: function(mode, name) {
           this.name = name;
           this.requests[name] = this;
-          Module['addRunDependency']('fp ' + this.name);
+          Module['addRunDependency'](`fp ${this.name}`);
         },
         send: function() {},
         onload: function() {
@@ -680,7 +707,7 @@ def generate_js(data_target, data_files, metadata):
       }\n''' % (create_preloaded if options.use_preload_plugins else create_data)
 
   if options.has_embedded and not options.obj_output:
-    err('--obj-output is recommended when using --embed.  This outputs an object file for linking directly into your application is more effecient than JS encoding')
+    err('--obj-output is recommended when using --embed.  This outputs an object file for linking directly into your application is more efficient than JS encoding')
 
   for counter, file_ in enumerate(data_files):
     filename = file_.dstpath
@@ -692,7 +719,7 @@ def generate_js(data_target, data_files, metadata):
         data = base64_encode(utils.read_binary(file_.srcpath))
         code += "      var fileData%d = '%s';\n" % (counter, data)
         # canOwn this data in the filesystem (i.e. there is no need to create a copy in the FS layer).
-        code += ("      Module['FS_createDataFile']('%s', '%s', decodeBase64(fileData%d), true, true, true);\n"
+        code += ("      Module['FS_createDataFile']('%s', '%s', atob(fileData%d), true, true, true);\n"
                  % (dirname, basename, counter))
     elif file_.mode == 'preload':
       # Preload
@@ -724,9 +751,8 @@ def generate_js(data_target, data_files, metadata):
       # LZ4FS usage
       temp = data_target + '.orig'
       shutil.move(data_target, temp)
-      meta = shared.run_js_tool(utils.path_from_root('tools/lz4-compress.js'),
-                                [utils.path_from_root('third_party/mini-lz4.js'),
-                                temp, data_target], stdout=PIPE)
+      meta = shared.run_js_tool(utils.path_from_root('tools/lz4-compress.mjs'),
+                                [temp, data_target], stdout=PIPE)
       os.unlink(temp)
       use_data = '''var compressedData = %s;
             compressedData['data'] = byteArray;
@@ -740,17 +766,13 @@ def generate_js(data_target, data_files, metadata):
     ret += '''
       var PACKAGE_PATH = '';
       if (typeof window === 'object') {
-        PACKAGE_PATH = window['encodeURIComponent'](window.location.pathname.toString().substring(0, window.location.pathname.toString().lastIndexOf('/')) + '/');
+        PACKAGE_PATH = window['encodeURIComponent'](window.location.pathname.substring(0, window.location.pathname.lastIndexOf('/')) + '/');
       } else if (typeof process === 'undefined' && typeof location !== 'undefined') {
         // web worker
-        PACKAGE_PATH = encodeURIComponent(location.pathname.toString().substring(0, location.pathname.toString().lastIndexOf('/')) + '/');
+        PACKAGE_PATH = encodeURIComponent(location.pathname.substring(0, location.pathname.lastIndexOf('/')) + '/');
       }
       var PACKAGE_NAME = '%s';
       var REMOTE_PACKAGE_BASE = '%s';
-      if (typeof Module['locateFilePackage'] === 'function' && !Module['locateFile']) {
-        Module['locateFile'] = Module['locateFilePackage'];
-        err('warning: you defined Module.locateFilePackage, that has been renamed to Module.locateFile (using your locateFilePackage for now)');
-      }
       var REMOTE_PACKAGE_NAME = Module['locateFile'] ? Module['locateFile'](REMOTE_PACKAGE_BASE, '') : REMOTE_PACKAGE_BASE;\n''' % (js_manipulation.escape_for_js_string(data_target), js_manipulation.escape_for_js_string(remote_package_name))
     metadata['remote_package_size'] = remote_package_size
     ret += '''var REMOTE_PACKAGE_SIZE = metadata['remote_package_size'];\n'''
@@ -764,28 +786,34 @@ def generate_js(data_target, data_files, metadata):
 
       code += r'''
         var PACKAGE_UUID = metadata['package_uuid'];
-        var indexedDB;
-        if (typeof window === 'object') {
-          indexedDB = window.indexedDB || window.mozIndexedDB || window.webkitIndexedDB || window.msIndexedDB;
-        } else if (typeof location !== 'undefined') {
-          // worker
-          indexedDB = self.indexedDB;
-        } else {
-          throw 'using IndexedDB to cache data can only be done on a web page or in a web worker';
-        }
         var IDB_RO = "readonly";
         var IDB_RW = "readwrite";
         var DB_NAME = "''' + options.indexeddb_name + '''";
         var DB_VERSION = 1;
         var METADATA_STORE_NAME = 'METADATA';
         var PACKAGE_STORE_NAME = 'PACKAGES';
-        function openDatabase(callback, errback) {
+        function openDatabase(callback, errback) {'''
+      if options.support_node:
+        code += '''
+            if (isNode) {
+              return errback();
+            }'''
+      code += '''
+          var indexedDB;
+          if (typeof window === 'object') {
+            indexedDB = window.indexedDB || window.mozIndexedDB || window.webkitIndexedDB || window.msIndexedDB;
+          } else if (typeof location !== 'undefined') {
+            // worker
+            indexedDB = self.indexedDB;
+          } else {
+            throw 'using IndexedDB to cache data can only be done on a web page or in a web worker';
+          }
           try {
             var openRequest = indexedDB.open(DB_NAME, DB_VERSION);
           } catch (e) {
             return errback(e);
           }
-          openRequest.onupgradeneeded = function(event) {
+          openRequest.onupgradeneeded = (event) => {
             var db = /** @type {IDBDatabase} */ (event.target.result);
 
             if (db.objectStoreNames.contains(PACKAGE_STORE_NAME)) {
@@ -798,13 +826,11 @@ def generate_js(data_target, data_files, metadata):
             }
             var metadata = db.createObjectStore(METADATA_STORE_NAME);
           };
-          openRequest.onsuccess = function(event) {
+          openRequest.onsuccess = (event) => {
             var db = /** @type {IDBDatabase} */ (event.target.result);
             callback(db);
           };
-          openRequest.onerror = function(error) {
-            errback(error);
-          };
+          openRequest.onerror = (error) => errback(error);
         };
 
         // This is needed as chromium has a limit on per-entry files in IndexedDB
@@ -831,10 +857,10 @@ def generate_js(data_target, data_files, metadata):
             nextChunkSliceStart += CHUNK_SIZE;
             var putPackageRequest = packages.put(
               packageData.slice(chunkSliceStart, nextChunkSliceStart),
-              'package/' + packageName + '/' + chunkId
+              `package/${packageName}/${chunkId}`
             );
             chunkSliceStart = nextChunkSliceStart;
-            putPackageRequest.onsuccess = function(event) {
+            putPackageRequest.onsuccess = (event) => {
               finishedChunks++;
               if (finishedChunks == chunkCount) {
                 var transaction_metadata = db.transaction(
@@ -847,19 +873,13 @@ def generate_js(data_target, data_files, metadata):
                     'uuid': packageMeta.uuid,
                     'chunkCount': chunkCount
                   },
-                  'metadata/' + packageName
+                  `metadata/${packageName}`
                 );
-                putMetadataRequest.onsuccess = function(event) {
-                  callback(packageData);
-                };
-                putMetadataRequest.onerror = function(error) {
-                  errback(error);
-                };
+                putMetadataRequest.onsuccess = (event) =>  callback(packageData);
+                putMetadataRequest.onerror = (error) => errback(error);
               }
             };
-            putPackageRequest.onerror = function(error) {
-              errback(error);
-            };
+            putPackageRequest.onerror = (error) => errback(error);
           }
         }
 
@@ -867,8 +887,8 @@ def generate_js(data_target, data_files, metadata):
         function checkCachedPackage(db, packageName, callback, errback) {
           var transaction = db.transaction([METADATA_STORE_NAME], IDB_RO);
           var metadata = transaction.objectStore(METADATA_STORE_NAME);
-          var getRequest = metadata.get('metadata/' + packageName);
-          getRequest.onsuccess = function(event) {
+          var getRequest = metadata.get(`metadata/${packageName}`);
+          getRequest.onsuccess = (event) => {
             var result = event.target.result;
             if (!result) {
               return callback(false, null);
@@ -876,9 +896,7 @@ def generate_js(data_target, data_files, metadata):
               return callback(PACKAGE_UUID === result['uuid'], result);
             }
           };
-          getRequest.onerror = function(error) {
-            errback(error);
-          };
+          getRequest.onerror = (error) => errback(error);
         }
 
         function fetchCachedPackage(db, packageName, metadata, callback, errback) {
@@ -891,8 +909,12 @@ def generate_js(data_target, data_files, metadata):
           var chunks = new Array(chunkCount);
 
           for (var chunkId = 0; chunkId < chunkCount; chunkId++) {
-            var getRequest = packages.get('package/' + packageName + '/' + chunkId);
-            getRequest.onsuccess = function(event) {
+            var getRequest = packages.get(`package/${packageName}/${chunkId}`);
+            getRequest.onsuccess = (event) => {
+              if (!event.target.result) {
+                errback(new Error(`CachedPackageNotFound for: ${packageName}`));
+                return;
+              }
               // If there's only 1 chunk, there's nothing to concatenate it with so we can just return it now
               if (chunkCount == 1) {
                 callback(event.target.result);
@@ -919,9 +941,7 @@ def generate_js(data_target, data_files, metadata):
                 }
               }
             };
-            getRequest.onerror = function(error) {
-              errback(error);
-            };
+            getRequest.onerror = (error) => errback(error);
           }
         }\n'''
 
@@ -929,8 +949,8 @@ def generate_js(data_target, data_files, metadata):
     node_support_code = ''
     if options.support_node:
       node_support_code = '''
-        if (typeof process === 'object' && typeof process.versions === 'object' && typeof process.versions.node === 'string') {
-          require('fs').readFile(packageName, function(err, contents) {
+        if (isNode) {
+          require('fs').readFile(packageName, (err, contents) => {
             if (err) {
               errback(err);
             } else {
@@ -939,54 +959,62 @@ def generate_js(data_target, data_files, metadata):
           });
           return;
         }'''.strip()
+
     ret += '''
       function fetchRemotePackage(packageName, packageSize, callback, errback) {
         %(node_support_code)s
-        var xhr = new XMLHttpRequest();
-        xhr.open('GET', packageName, true);
-        xhr.responseType = 'arraybuffer';
-        xhr.onprogress = function(event) {
-          var url = packageName;
-          var size = packageSize;
-          if (event.total) size = event.total;
-          if (event.loaded) {
-            if (!xhr.addedTotal) {
-              xhr.addedTotal = true;
-              if (!Module.dataFileDownloads) Module.dataFileDownloads = {};
-              Module.dataFileDownloads[url] = {
-                loaded: event.loaded,
-                total: size
-              };
-            } else {
-              Module.dataFileDownloads[url].loaded = event.loaded;
+        Module['dataFileDownloads'] ??= {};
+        fetch(packageName)
+          .catch((cause) => Promise.reject(new Error(`Network Error: ${packageName}`, {cause}))) // If fetch fails, rewrite the error to include the failing URL & the cause.
+          .then((response) => {
+            if (!response.ok) {
+              return Promise.reject(new Error(`${response.status}: ${response.url}`));
             }
-            var total = 0;
-            var loaded = 0;
-            var num = 0;
-            for (var download in Module.dataFileDownloads) {
-            var data = Module.dataFileDownloads[download];
-              total += data.total;
-              loaded += data.loaded;
-              num++;
+
+            if (!response.body && response.arrayBuffer) { // If we're using the polyfill, readers won't be available...
+              return response.arrayBuffer().then(callback);
             }
-            total = Math.ceil(total * Module.expectedDataFileDownloads/num);
-            if (Module['setStatus']) Module['setStatus']('Downloading data... (' + loaded + '/' + total + ')');
-          } else if (!Module.dataFileDownloads) {
-            if (Module['setStatus']) Module['setStatus']('Downloading data...');
-          }
-        };
-        xhr.onerror = function(event) {
-          throw new Error("NetworkError for: " + packageName);
-        }
-        xhr.onload = function(event) {
-          if (xhr.status == 200 || xhr.status == 304 || xhr.status == 206 || (xhr.status == 0 && xhr.response)) { // file URLs can return 0
-            var packageData = xhr.response;
-            callback(packageData);
-          } else {
-            throw new Error(xhr.statusText + " : " + xhr.responseURL);
-          }
-        };
-        xhr.send(null);
+
+            const reader = response.body.getReader();
+            const iterate = () => reader.read().then(handleChunk).catch((cause) => {
+              return Promise.reject(new Error(`Unexpected error while handling : ${response.url} ${cause}`, {cause}));
+            });
+
+            const chunks = [];
+            const headers = response.headers;
+            const total = Number(headers.get('Content-Length') ?? packageSize);
+            let loaded = 0;
+
+            const handleChunk = ({done, value}) => {
+              if (!done) {
+                chunks.push(value);
+                loaded += value.length;
+                Module['dataFileDownloads'][packageName] = {loaded, total};
+
+                let totalLoaded = 0;
+                let totalSize = 0;
+
+                for (const download of Object.values(Module['dataFileDownloads'])) {
+                  totalLoaded += download.loaded;
+                  totalSize += download.total;
+                }
+
+                Module['setStatus']?.(`Downloading data... (${totalLoaded}/${totalSize})`);
+                return iterate();
+              } else {
+                const packageData = new Uint8Array(chunks.map((c) => c.length).reduce((a, b) => a + b, 0));
+                let offset = 0;
+                for (const chunk of chunks) {
+                  packageData.set(chunk, offset);
+                  offset += chunk.length;
+                }
+                callback(packageData.buffer);
+              }
+            };
+
+            Module['setStatus']?.('Downloading data...');
+            return iterate();
+          });
       };
 
       function handleError(error) {
@@ -1006,7 +1034,7 @@ def generate_js(data_target, data_files, metadata):
     # we need to find the datafile in the same dir as the html file
 
     code += '''
-      if (!Module.preloadResults) Module.preloadResults = {};\n'''
+      Module['preloadResults'] ??= {};\n'''
 
     if options.use_preload_cache:
       code += '''
@@ -1017,29 +1045,26 @@ def generate_js(data_target, data_files, metadata):
         };
 
         openDatabase(
-          function(db) {
-            checkCachedPackage(db, PACKAGE_PATH + PACKAGE_NAME,
-              function(useCached, metadata) {
-                Module.preloadResults[PACKAGE_NAME] = {fromCache: useCached};
+          (db) => checkCachedPackage(db, PACKAGE_PATH + PACKAGE_NAME,
+              (useCached, metadata) => {
+                Module['preloadResults'][PACKAGE_NAME] = {fromCache: useCached};
                 if (useCached) {
                   fetchCachedPackage(db, PACKAGE_PATH + PACKAGE_NAME, metadata, processPackageData, preloadFallback);
                 } else {
                   fetchRemotePackage(REMOTE_PACKAGE_NAME, REMOTE_PACKAGE_SIZE,
-                    function(packageData) {
+                    (packageData) => {
                       cacheRemotePackage(db, PACKAGE_PATH + PACKAGE_NAME, packageData, {uuid:PACKAGE_UUID}, processPackageData,
-                        function(error) {
+                        (error) => {
                           console.error(error);
                           processPackageData(packageData);
                         });
                     }
                   , preloadFallback);
                 }
-              }
-            , preloadFallback);
-          }
+              }, preloadFallback)
         , preloadFallback);
 
-        if (Module['setStatus']) Module['setStatus']('Downloading...');\n'''
+        Module['setStatus']?.('Downloading...');\n'''
     else:
       # Not using preload cache, so we might as well start the xhr ASAP,
       # potentially before JS parsing of the main codebase if it's after us.
@@ -1049,7 +1074,7 @@ def generate_js(data_target, data_files, metadata):
       var fetchedCallback = null;
       var fetched = Module['getPreloadedPackage'] ? Module['getPreloadedPackage'](REMOTE_PACKAGE_NAME, REMOTE_PACKAGE_SIZE) : null;
 
-      if (!fetched) fetchRemotePackage(REMOTE_PACKAGE_NAME, REMOTE_PACKAGE_SIZE, function(data) {
+      if (!fetched) fetchRemotePackage(REMOTE_PACKAGE_NAME, REMOTE_PACKAGE_SIZE, (data) => {
         if (fetchedCallback) {
           fetchedCallback(data);
           fetchedCallback = null;
@@ -1059,7 +1084,7 @@ def generate_js(data_target, data_files, metadata):
       }, handleError);\n'''
 
       code += '''
-      Module.preloadResults[PACKAGE_NAME] = {fromCache: false};
+      Module['preloadResults'][PACKAGE_NAME] = {fromCache: false};
       if (fetched) {
         processPackageData(fetched);
         fetched = null;
@@ -1068,50 +1093,61 @@ def generate_js(data_target, data_files, metadata):
       }\n'''
 
   ret += '''
-    function runWithFS() {\n'''
+    function runWithFS(Module) {\n'''
   ret += code
   ret += '''
     }
     if (Module['calledRun']) {
-      runWithFS();
+      runWithFS(Module);
     } else {
-      if (!Module['preRun']) Module['preRun'] = [];
-      Module["preRun"].push(runWithFS); // FS is not initialized yet, wait for it
+      (Module['preRun'] ??= []).push(runWithFS); // FS is not initialized yet, wait for it
     }\n'''
 
   if options.separate_metadata:
-      _metadata_template = '''
+    node_support_code = ''
+    if options.support_node:
+      node_support_code = '''
+        if (isNode) {
+          require('fs').readFile(metadataUrl, 'utf8', (err, contents) => {
+            if (err) {
+              return Promise.reject(err);
+            } else {
+              loadPackage(JSON.parse(contents));
+            }
+          });
+          return;
+        }'''.strip()
+
+    ret += '''
     Module['removeRunDependency']('%(metadata_file)s');
   }
 
   function runMetaWithFS() {
     Module['addRunDependency']('%(metadata_file)s');
-    var REMOTE_METADATA_NAME = Module['locateFile'] ? Module['locateFile']('%(metadata_file)s', '') : '%(metadata_file)s';
-    var xhr = new XMLHttpRequest();
-    xhr.onreadystatechange = function() {
-     if (xhr.readyState === 4 && xhr.status === 200) {
-       loadPackage(JSON.parse(xhr.responseText));
-     }
-    }
-    xhr.open('GET', REMOTE_METADATA_NAME, true);
-    xhr.overrideMimeType('application/json');
-    xhr.send(null);
+    var metadataUrl = Module['locateFile'] ? Module['locateFile']('%(metadata_file)s', '') : '%(metadata_file)s';
+    %(node_support_code)s
+    fetch(metadataUrl)
+      .then((response) => {
+        if (response.ok) {
+          return response.json();
+        }
+        return Promise.reject(new Error(`${response.status}: ${response.url}`));
+      })
+      .then(loadPackage);
   }
 
   if (Module['calledRun']) {
     runMetaWithFS();
   } else {
-    if (!Module['preRun']) Module['preRun'] = [];
-    Module["preRun"].push(runMetaWithFS);
-  }\n''' % {'metadata_file': os.path.basename(options.jsoutput + '.metadata')}
-
+    (Module['preRun'] ??= []).push(runMetaWithFS);
+  }\n''' % {'node_support_code': node_support_code, 'metadata_file': os.path.basename(options.jsoutput + '.metadata')}
   else:
-      _metadata_template = '''
+    ret += '''
     }
     loadPackage(%s);\n''' % json.dumps(metadata)
 
-  ret += '''%s
-  })();\n''' % _metadata_template
+  ret += '''
+  })();\n'''
 
   return ret
 

@@ -111,6 +111,12 @@ module({
             derived.delete();
         });
 
+        test("class functions are inherited in subclasses", function() {
+            assert.equal("Base", cm.Base.classFunction());
+            assert.equal("Derived", cm.Derived.classFunction());
+            assert.equal("Derived", cm.DerivedTwice.classFunction());
+        });
+
         test("calling method on unrelated class throws error", function() {
             var a = new cm.HasTwoBases;
             var e = assert.throws(cm.BindingError, function() {
@@ -133,17 +139,24 @@ module({
             var e = assert.throws(cm.BindingError, function() {
                 cm.Derived.prototype.setMember.call(undefined, "foo");
             });
-            assert.equal('Cannot pass "[object global]" as a Derived*', e.message);
+            assert.matches(/Cannot pass "(undefined|\[object global\])" as a Derived\*/, e.message);
 
             var e = assert.throws(cm.BindingError, function() {
                 cm.Derived.prototype.setMember.call(true, "foo");
             });
             assert.equal('Cannot pass "true" as a Derived*', e.message);
 
-            var e = assert.throws(cm.BindingError, function() {
-                cm.Derived.prototype.setMember.call(null, "foo");
-            });
-            assert.equal('Cannot pass "[object global]" as a Derived*', e.message);
+            if (cm.getCompilerSetting('STRICT_JS') && !cm.getCompilerSetting('DYNAMIC_EXECUTION')) {
+              var e = assert.throws(TypeError, function() {
+                  cm.Derived.prototype.setMember.call(null, "foo");
+              });
+              assert.equal('Cannot convert "foo" to int', e.message)
+            } else {
+              var e = assert.throws(cm.BindingError, function() {
+                  cm.Derived.prototype.setMember.call(null, "foo");
+              });
+              assert.equal('Cannot pass "[object global]" as a Derived*', e.message)
+            }
 
             var e = assert.throws(cm.BindingError, function() {
                 cm.Derived.prototype.setMember.call(42, "foo");
@@ -158,21 +171,20 @@ module({
             var e = assert.throws(cm.BindingError, function() {
                 cm.Derived.prototype.setMember.call({}, "foo");
             });
-            assert.equal('Cannot pass "[object Object]" as a Derived*', e.message);
+            assert.matches(/Cannot pass "(undefined|\[object Object\])" as a Derived\*/, e.message);
         });
 
         test("setting and getting property on unrelated class throws error", function() {
-            var className = cm['DYNAMIC_EXECUTION'] ? 'HasTwoBases' : '';
             var a = new cm.HasTwoBases;
             var e = assert.throws(cm.BindingError, function() {
                 Object.getOwnPropertyDescriptor(cm.HeldBySmartPtr.prototype, 'i').set.call(a, 10);
             });
-            assert.equal('HeldBySmartPtr.i setter incompatible with "this" of type ' + className, e.message);
+            assert.equal('HeldBySmartPtr.i setter incompatible with "this" of type HasTwoBases', e.message);
 
             var e = assert.throws(cm.BindingError, function() {
                 Object.getOwnPropertyDescriptor(cm.HeldBySmartPtr.prototype, 'i').get.call(a);
             });
-            assert.equal('HeldBySmartPtr.i getter incompatible with "this" of type ' + className, e.message);
+            assert.equal('HeldBySmartPtr.i getter incompatible with "this" of type HasTwoBases', e.message);
 
             a.delete();
         });
@@ -379,7 +391,7 @@ module({
     });
 
     BaseFixture.extend("string", function() {
-        var stdStringIsUTF8 = (cm['EMBIND_STD_STRING_IS_UTF8'] === true);
+        var stdStringIsUTF8 = cm.getCompilerSetting('EMBIND_STD_STRING_IS_UTF8');
 
         test("non-ascii strings", function() {
 
@@ -436,33 +448,6 @@ module({
             var e = cm.emval_test_take_and_return_std_string((new Int8Array([65, 66, 67, 68])).buffer);
             assert.equal('ABCD', e);
         });
-        
-        test("can pass Uint8Array to std::basic_string<unsigned char>", function() {
-            var e = cm.emval_test_take_and_return_std_basic_string_unsigned_char(new Uint8Array([65, 66, 67, 68]));
-            assert.equal('ABCD', e);
-        });
-
-        test("can pass long string to std::basic_string<unsigned char>", function() {
-            var s = 'this string is long enough to exceed the short string optimization';
-            var e = cm.emval_test_take_and_return_std_basic_string_unsigned_char(s);
-            assert.equal(s, e);
-        });
-
-        test("can pass Uint8ClampedArray to std::basic_string<unsigned char>", function() {
-            var e = cm.emval_test_take_and_return_std_basic_string_unsigned_char(new Uint8ClampedArray([65, 66, 67, 68]));
-            assert.equal('ABCD', e);
-        });
-
-
-        test("can pass Int8Array to std::basic_string<unsigned char>", function() {
-            var e = cm.emval_test_take_and_return_std_basic_string_unsigned_char(new Int8Array([65, 66, 67, 68]));
-            assert.equal('ABCD', e);
-        });
-
-        test("can pass ArrayBuffer to std::basic_string<unsigned char>", function() {
-            var e = cm.emval_test_take_and_return_std_basic_string_unsigned_char((new Int8Array([65, 66, 67, 68])).buffer);
-            assert.equal('ABCD', e);
-        });
 
         test("can pass string to std::string", function() {
             var string = stdStringIsUTF8?"aeiáéíαειЖЛФ從獅子€":"ABCD";
@@ -470,7 +455,7 @@ module({
             var e = cm.emval_test_take_and_return_std_string(string);
             assert.equal(string, e);
         });
-        
+
         var utf16TestString = String.fromCharCode(10) +
             String.fromCharCode(1234) +
             String.fromCharCode(2345) +
@@ -512,12 +497,12 @@ module({
                 cm.force_memory_growth();
                 assert.equal("get_literal_wstring", cm.get_literal_wstring());
             });
-            
+
             test("can access a literal u16string after a memory growth", function() {
                 cm.force_memory_growth();
                 assert.equal("get_literal_u16string", cm.get_literal_u16string());
             });
-            
+
             test("can access a literal u32string after a memory growth", function() {
                 cm.force_memory_growth();
                 assert.equal("get_literal_u32string", cm.get_literal_u32string());
@@ -643,7 +628,7 @@ module({
             assert.throws(TypeError, function() { cm.const_ref_adder(0n, 1); });
         });
 
-        if (cm['ASSERTIONS']) {
+        if (cm.getCompilerSetting('ASSERTIONS')) {
             test("can pass only number and boolean as floats with assertions", function() {
                 assert.throws(TypeError, function() { cm.const_ref_adder(1, undefined); });
                 assert.throws(TypeError, function() { cm.const_ref_adder(1, null); });
@@ -693,6 +678,10 @@ module({
 
         test("no memory leak when passing strings in by const reference", function() {
             cm.emval_test_take_and_return_std_string_const_ref("foobar");
+        });
+
+        test("val callback arguments are not destroyed", function() {
+            cm.emval_test_callback_arg_lifetime(function() {});
         });
 
         test("can get global", function(){
@@ -825,7 +814,7 @@ module({
             assert.equal("-2147483648", cm.long_to_string(-2147483648));
 
             // passing out of range values should fail with assertions.
-            if (cm['ASSERTIONS']) {
+            if (cm.getCompilerSetting('ASSERTIONS')) {
                 assert.throws(TypeError, function() { cm.char_to_string(-129); });
                 assert.throws(TypeError, function() { cm.char_to_string(128); });
                 assert.throws(TypeError, function() { cm.signed_char_to_string(-129); });
@@ -840,10 +829,17 @@ module({
                 assert.throws(TypeError, function() { cm.int_to_string(2147483648); });
                 assert.throws(TypeError, function() { cm.unsigned_int_to_string(-1); });
                 assert.throws(TypeError, function() { cm.unsigned_int_to_string(4294967296); });
-                assert.throws(TypeError, function() { cm.long_to_string(-2147483649); });
-                assert.throws(TypeError, function() { cm.long_to_string(2147483648); });
-                assert.throws(TypeError, function() { cm.unsigned_long_to_string(-1); });
-                assert.throws(TypeError, function() { cm.unsigned_long_to_string(4294967296); });
+                if (cm.getCompilerSetting('MEMORY64')) {
+                    assert.throws(TypeError, function() { cm.long_to_string(-18446744073709551616n); });
+                    assert.throws(TypeError, function() { cm.long_to_string(18446744073709551616n); });
+                    assert.throws(TypeError, function() { cm.unsigned_long_to_string(-1n); });
+                    assert.throws(TypeError, function() { cm.unsigned_long_to_string(18446744073709551616n); });
+                } else {
+                    assert.throws(TypeError, function() { cm.long_to_string(-2147483649); });
+                    assert.throws(TypeError, function() { cm.long_to_string(2147483648); });
+                    assert.throws(TypeError, function() { cm.unsigned_long_to_string(-1); });
+                    assert.throws(TypeError, function() { cm.unsigned_long_to_string(4294967296); });
+                }
             } else {
                 // test that an out of range value doesn't throw without assertions.
                 assert.equal("-129", cm.char_to_string(-129));
@@ -864,7 +860,7 @@ module({
             assert.equal(2147483648, cm.load_unsigned_long());
         });
 
-        if (cm['ASSERTIONS']) {
+        if (cm.getCompilerSetting('ASSERTIONS')) {
             test("throws type error when attempting to coerce null to int", function() {
                 var e = assert.throws(TypeError, function() {
                     cm.int_to_string(null);
@@ -1045,13 +1041,13 @@ module({
 
             assert.equal(undefined, vec.get(4));
             // only test a negative index without assertions.
-            if (!cm['ASSERTIONS']) {
+            if (!cm.getCompilerSetting('ASSERTIONS')) {
                 assert.equal(undefined, vec.get(-1));
             }
             vec.delete();
         });
 
-        if (cm['ASSERTIONS']) {
+        if (cm.getCompilerSetting('ASSERTIONS')) {
             test("out of type range array index throws with assertions", function() {
                 var vec = cm.emval_test_return_vector();
 
@@ -1137,6 +1133,14 @@ module({
             assert.equal(20, vec.get(1));
             vec.delete();
         });
+
+        test("vectors can contain pointers", function() {
+            var vec = cm.emval_test_return_vector_pointers();
+            var small = vec.get(0);
+            assert.equal(7, small.member);
+            small.delete();
+            vec.delete();
+        });
     });
 
     BaseFixture.extend("map", function() {
@@ -1179,6 +1183,104 @@ module({
 
            map.delete();
        });
+    });
+
+    BaseFixture.extend("optional", function() {
+        if (!("embind_test_return_optional_int" in cm)) {
+            return;
+        }
+        test("std::optional works with returning int", function() {
+            var optional = cm.embind_test_return_optional_int(true);
+            assert.equal(42, optional);
+
+            optional = cm.embind_test_return_optional_int(false);
+            assert.equal(undefined, optional);
+        });
+
+        test("std::optional works with returning float", function() {
+            var optional = cm.embind_test_return_optional_float(true);
+            assert.equal(Math.fround(4.2), optional);
+
+            optional = cm.embind_test_return_optional_float(false);
+            assert.equal(undefined, optional);
+        });
+
+        test("std::optional works with returning SmallClass", function() {
+            var optional = cm.embind_test_return_optional_small_class(true);
+            assert.equal(7, optional.member);
+            optional.delete();
+
+            optional = cm.embind_test_return_optional_small_class(false);
+            assert.equal(undefined, optional);
+        });
+
+        test("std::optional works with returning SmallClass pointer", function() {
+            var optional = cm.embind_test_return_optional_small_class_pointer(true);
+            assert.equal(7, optional.member);
+            optional.delete();
+
+            optional = cm.embind_test_return_optional_small_class(false);
+            assert.equal(undefined, optional);
+        });
+
+        test("std::optional works with returning string", function() {
+            var optional = cm.embind_test_return_optional_string(true);
+            assert.equal("hello", optional);
+
+            optional = cm.embind_test_return_optional_string(false);
+            assert.equal(undefined, optional);
+        });
+
+        test("std::optional works int arg", function() {
+            var value = cm.embind_test_optional_int_arg(42);
+            assert.equal(42, value);
+
+            value = cm.embind_test_optional_int_arg(undefined);
+            assert.equal(-1, value);
+        });
+
+        test("std::optional works float arg", function() {
+            var value = cm.embind_test_optional_float_arg(4.2);
+            assert.equal(Math.fround(4.2), value);
+
+            value = cm.embind_test_optional_float_arg(undefined);
+            assert.equal(Math.fround(-1.1), value);
+        });
+
+        test("std::optional works string arg", function() {
+            var value = cm.embind_test_optional_string_arg("hello");
+            assert.equal("hello", value);
+
+            value = cm.embind_test_optional_string_arg("");
+            assert.equal("", value);
+
+            value = cm.embind_test_optional_string_arg(undefined);
+            assert.equal("no value", value);
+        });
+
+        test("std::optional works SmallClass arg", function() {
+            var small = new cm.SmallClass();
+            var value = cm.embind_test_optional_small_class_arg(small);
+            assert.equal(7, value);
+            small.delete();
+
+            value = cm.embind_test_optional_small_class_arg(undefined);
+            assert.equal(-1, value);
+        });
+
+        test("std::optional args can be omitted", function() {
+            if (cm.getCompilerSetting('ASSERTIONS')) {
+                // Argument length is only validated with assertions enabled.
+                assert.throws(cm.BindingError, function() {
+                    cm.embind_test_optional_multiple_arg();
+                });
+                assert.throws(cm.BindingError, function() {
+                    cm.embind_test_optional_multiple_arg(1, 2, 3, 4);
+                });
+            }
+            cm.embind_test_optional_multiple_arg(1);
+            cm.embind_test_optional_multiple_arg(1, 2);
+        });
     });
 
     BaseFixture.extend("functors", function() {
@@ -1446,7 +1548,7 @@ module({
             c.delete();
         });
 
-        if (cm['ASSERTIONS']) {
+        if (cm.getCompilerSetting('ASSERTIONS')) {
             test("assigning string or object to integer raises TypeError with assertions", function() {
                 var c = new cm.CustomStruct();
                 var e = assert.throws(TypeError, function() {
@@ -1712,6 +1814,13 @@ module({
             assert.equal("foo", e.getString());
             e.delete();
         });
+
+        test("can construct class with external constructor with no copy constructor", function() {
+            var e = new cm.HasExternalConstructorNoCopy(42);
+            assert.instanceof(e, cm.HasExternalConstructorNoCopy);
+            assert.equal(42, e.getInt());
+            e.delete();
+        });
     });
 
     BaseFixture.extend("const", function() {
@@ -1766,8 +1875,7 @@ module({
 
         test("smart pointer object has correct constructor name", function() {
             var e = new cm.HeldBySmartPtr(10, "foo");
-            var expectedName = cm['DYNAMIC_EXECUTION'] ? "HeldBySmartPtr" : "";
-            assert.equal(expectedName, e.constructor.name);
+            assert.equal("HeldBySmartPtr", e.constructor.name);
             e.delete();
         });
 
@@ -2074,7 +2182,7 @@ module({
             assert.equal(10, instance.property);
             instance.delete();
         });
-        
+
         test("pass derived object to c++", function() {
             var Implementation = cm.AbstractClass.extend("Implementation", {
                 abstractMethod: function() {
@@ -2510,15 +2618,10 @@ module({
     });
 
     BaseFixture.extend("function names", function() {
-        if (!cm['DYNAMIC_EXECUTION']) {
-          assert.equal('', cm.ValHolder.name);
-          assert.equal('', cm.ValHolder.prototype.setVal.name);
-          assert.equal('', cm.ValHolder.makeConst.name);
-        } else {
-          assert.equal('ValHolder', cm.ValHolder.name);
-          assert.equal('ValHolder$setVal', cm.ValHolder.prototype.setVal.name);
-          assert.equal('ValHolder$makeConst', cm.ValHolder.makeConst.name);
-        }
+        assert.equal('ValHolder', cm.ValHolder.name);
+
+        assert.equal('ValHolder.setVal', cm.ValHolder.prototype.setVal.name);
+        assert.equal('ValHolder.makeConst', cm.ValHolder.makeConst.name);
     });
 
     BaseFixture.extend("constants", function() {
@@ -2720,7 +2823,11 @@ module({
             assert.equal(127,   cm.val_as_char(127));
             assert.equal(32767, cm.val_as_short(32767));
             assert.equal(65536, cm.val_as_int(65536));
-            assert.equal(65536, cm.val_as_long(65536));
+            if (cm.getCompilerSetting('MEMORY64')) {
+                assert.equal(65536n, cm.val_as_long(65536));
+            } else {
+                assert.equal(65536, cm.val_as_long(65536));
+            }
             assert.equal(10.5,  cm.val_as_float(10.5));
             assert.equal(10.5,  cm.val_as_double(10.5));
 

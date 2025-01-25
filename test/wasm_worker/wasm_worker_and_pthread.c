@@ -2,6 +2,7 @@
 #include <emscripten.h>
 #include <emscripten/wasm_worker.h>
 #include <emscripten/threading.h>
+#include <emscripten/console.h>
 #include <assert.h>
 
 volatile int pthread_ran = 0;
@@ -14,9 +15,8 @@ EM_JS(int, am_i_wasm_worker, (), {
   return ENVIRONMENT_IS_WASM_WORKER;
 });
 
-void *thread_main(void *arg)
-{
-  EM_ASM(out('hello from pthread!'));
+void *thread_main(void *arg) {
+  emscripten_out("hello from pthread!");
   assert(am_i_pthread());
   assert(!am_i_wasm_worker());
   assert(!emscripten_current_thread_is_wasm_worker());
@@ -25,9 +25,8 @@ void *thread_main(void *arg)
   return 0;
 }
 
-void worker_main()
-{
-  EM_ASM(out('hello from wasm worker!'));
+void worker_main() {
+  emscripten_out("hello from wasm worker!");
   assert(!am_i_pthread());
   assert(am_i_wasm_worker());
   assert(emscripten_current_thread_is_wasm_worker());
@@ -40,8 +39,7 @@ void worker_main()
 #endif
 }
 
-int main()
-{
+int main() {
   pthread_t thread;
   pthread_create(&thread, NULL, thread_main, NULL);
 
