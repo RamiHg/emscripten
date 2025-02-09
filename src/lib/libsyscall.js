@@ -228,7 +228,7 @@ var SyscallsLibrary = {
         return 0;
       }
       case {{{ cDefs.TCGETS }}}: {
-        if (!stream.tty) return -{{{ cDefs.ENOTTY }}};
+        if (!stream.tty || !stream.tty.ops) return -{{{ cDefs.ENOTTY }}};
         if (stream.tty.ops.ioctl_tcgets) {
           var termios = stream.tty.ops.ioctl_tcgets(stream);
           var argp = syscallGetVarargP();
@@ -255,7 +255,7 @@ var SyscallsLibrary = {
       case {{{ cDefs.TCSETS }}}:
       case {{{ cDefs.TCSETSW }}}:
       case {{{ cDefs.TCSETSF }}}: {
-        if (!stream.tty) return -{{{ cDefs.ENOTTY }}};
+        if (!stream.tty || !stream.tty.ops) return -{{{ cDefs.ENOTTY }}};
         if (stream.tty.ops.ioctl_tcsets) {
           var argp = syscallGetVarargP();
           var c_iflag = {{{ makeGetValue('argp', C_STRUCTS.termios.c_iflag, 'i32') }}};
@@ -800,7 +800,6 @@ var SyscallsLibrary = {
         return 0; // Pretend that the locking is successful.
       case {{{ cDefs.F_OFD_GETLK }}}:
         return -{{{ cDefs.EINVAL }}};
-      default: {
 #if SYSCALL_DEBUG
       case {{{ cDefs.F_GETOWN_EX }}}:
       case {{{ cDefs.F_SETOWN }}}:

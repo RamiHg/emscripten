@@ -101,6 +101,7 @@
             "S_IRWXO",
             "F_SETLKW",
             "F_GETLK",
+            "F_OFD_GETLK",
             "S_ISVTX",
             "O_RDONLY",
             "O_ACCMODE",
