@@ -1046,6 +1046,7 @@ addToLibrary({
     //
     // try as a numeric address
     //
+    const node_ptr = node;
     node = UTF8ToString(node);
     addr = inetPton4(node);
     if (addr !== null) {
@@ -1071,7 +1072,7 @@ addToLibrary({
       }
     }
     if (addr != null) {
-      ai = allocaddrinfo(family, type, proto, node, addr, port);
+      ai = allocaddrinfo(family, type, proto, node_ptr, addr, port);
       {{{ makeSetValue('out', '0', 'ai', '*') }}};
       return 0;
     }
