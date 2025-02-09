@@ -72,6 +72,7 @@ Atomics.wait = function() {};
 Atomics.notify = function() {};
 Atomics.load = function() {};
 Atomics.store = function() {};
+Atomics.waitAsync = function() {};
 
 /**
  * @const
